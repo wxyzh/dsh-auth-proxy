@@ -38,6 +38,9 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`�
 - **`sync()` 两态**：仅 `host`/`port`/监听状态变化才重建服务器（`teardownServer` 优雅关闭：
   `close()` + 1.5s 兜底强关）；其余字段（token、banner、accessUrls、白名单、锁定）热更新，只换 `live` 快照。
   PUT 处理器**先写响应再 `setImmediate(sync)`**，保证保存响应先于重建到达浏览器。
+- **终端可见状态行**：dsh web 不把插件 `ctx.logger` 输出路由到终端（它自己的 URL 行用裸 `console.log`），
+  因此监听/禁用等操作者必须看到的状态用 `say()` / `sayWarn()`（`src/index.ts`：`ctx.logger` + `console.log`
+  双写镜像）输出，格式前缀 `dsh-auth-proxy: `；禁止把请求级日志（debug 等）改成 console.log 刷屏。
 - **请求处理器一律读 `live` 快照**（每请求 `const c = live`），禁止闭包捕获 `sync()` 时的 cfg 快照。
 
 ## 客户端纪律

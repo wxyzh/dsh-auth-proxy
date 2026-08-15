@@ -36,7 +36,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath } from 'node:path'
-import { homedir, networkInterfaces } from 'node:os'
+import { homedir } from 'node:os'
 import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -115,18 +115,6 @@ const TOKEN_PLACEHOLDER = 'change-me'
 function tokenConfigured(token: string): boolean {
   const trimmed = token.trim()
   return trimmed !== '' && trimmed !== TOKEN_PLACEHOLDER
-}
-
-/** Non-internal IPv4 addresses, for logging reachable URLs when binding a wildcard. */
-function localAddresses(): string[] {
-  const out: string[] = []
-  for (const list of Object.values(networkInterfaces())) {
-    if (!list) continue
-    for (const info of list) {
-      if (info.family === 'IPv4' && !info.internal) out.push(info.address)
-    }
-  }
-  return out.sort()
 }
 
 /**
@@ -460,6 +448,21 @@ export function apply(ctx: Context, config?: Config): void {
   /** Whether the listen socket is currently up (reported by the config API). */
   let serverUp = false
 
+  /**
+   * Terminal-visible announce. dsh web prints its own URL line with a plain
+   * console.log (dsh-web-app) but does not route plugin ctx.logger output to
+   * the console — so the state changes the operator must see are echoed here.
+   * The ctx.logger call still feeds the in-memory log buffer.
+   */
+  const say = (line: string): void => {
+    ctx.logger.info(`dsh-auth-proxy: ${line}`)
+    console.log(`dsh-auth-proxy: ${line}`)
+  }
+  const sayWarn = (line: string): void => {
+    ctx.logger.warn(`dsh-auth-proxy: ${line}`)
+    console.log(`dsh-auth-proxy: ${line}`)
+  }
+
   const loginPath = '/__dsh_auth/login'
   const logoutPath = '/__dsh_auth/logout'
 
@@ -520,11 +523,11 @@ export function apply(ctx: Context, config?: Config): void {
       if (!shouldListen && !announcedDisabled) {
         announcedDisabled = true
         if (!tokenConfigured(next.token)) {
-          ctx.logger.warn('dsh-auth-proxy: no token configured (empty or placeholder `change-me`) — proxy disabled (set `token` in the plugin config)')
+          sayWarn('disabled — no token configured (empty or placeholder `change-me`); set `token` in the plugin config')
         } else if (hostIssue) {
-          ctx.logger.warn(`dsh-auth-proxy: refusing to listen on ${next.host}: ${hostIssue}`)
+          sayWarn(`disabled — refusing to listen on ${next.host}: ${hostIssue}`)
         } else {
-          ctx.logger.info('dsh-auth-proxy: disabled')
+          say('disabled')
         }
       }
       return
@@ -537,11 +540,11 @@ export function apply(ctx: Context, config?: Config): void {
     if (!shouldListen) {
       announcedDisabled = true
       if (!tokenConfigured(next.token)) {
-        ctx.logger.warn('dsh-auth-proxy: no token configured (empty or placeholder `change-me`) — proxy disabled (set `token` in the plugin config)')
+        sayWarn('disabled — no token configured (empty or placeholder `change-me`); set `token` in the plugin config')
       } else if (hostIssue) {
-        ctx.logger.warn(`dsh-auth-proxy: refusing to listen on ${next.host}: ${hostIssue}`)
+        sayWarn(`disabled — refusing to listen on ${next.host}: ${hostIssue}`)
       } else {
-        ctx.logger.info('dsh-auth-proxy: disabled')
+        say('disabled')
       }
       return
     }
@@ -730,16 +733,9 @@ export function apply(ctx: Context, config?: Config): void {
 
     srv.listen(next.port, next.host, () => {
       serverUp = true
-      ctx.logger.info(
-        `dsh-auth-proxy: listening on ${next.host}:${next.port} -> http://${next.targetHost}:${next.targetPort}`,
-      )
-      // 0.0.0.0 is not a clickable address: log the reachable LAN URLs too.
-      const reachable = (next.host === '0.0.0.0' || next.host === '::')
-        ? localAddresses().map((ip) => `http://${ip}:${next.port}`)
-        : [`http://${next.host}:${next.port}`]
-      if (reachable.length > 0) {
-        ctx.logger.info(`dsh-auth-proxy: reachable at ${reachable.join(', ')}`)
-      }
+      // Bind hosts are loopback or LAN-only by policy, so the bound URL is
+      // always concrete and clickable — no separate reachable-URLs line needed.
+      say(`listening on http://${next.host}:${next.port} -> http://${next.targetHost}:${next.targetPort}`)
     })
 
     server = srv

@@ -20,8 +20,9 @@ browser ──► auth proxy :8443 (127.0.0.1) ──► dsh webserver 127.0.0.1
 - IP 白名单（支持 CIDR，IPv4）可整体绕过令牌；失败登录锁定（按 IP，阈值与时长可配）。
 - 配置实时可改：Web UI「设置 > 插件配置」卡片（走插件自有 `/api/dsh-auth-proxy/config`），
   无需改文件；对纯 HTTP 局域网地址自动注入 `crypto.randomUUID` polyfill，保证前端 RPC 可用。
-- 状态可视：宿主日志与设置卡片显示实际监听地址（绑定回环/内网时列出可达的局域网 IP:端口）；
-  通过 `accessUrls` 声明的入口地址（可含 HTTPS 域名）会展示在卡片与登录页，多域名场景一眼可知该用哪个 URL。
+- 状态可视：宿主终端直接打印 `dsh-auth-proxy: listening on http://<host>:<port>`（console.log 镜像，
+  dsh web 不把插件 `ctx.logger` 打到终端），设置卡片同样显示实际监听地址；通过 `accessUrls` 声明的
+  入口地址（可含 HTTPS 域名）会展示在卡片与登录页，多域名场景一眼可知该用哪个 URL。
 - **无 TLS，禁绑通配/公网**：监听地址仅允许回环与内网（默认 `127.0.0.1`）；`0.0.0.0`、`::` 与公网 IP
   在保存与启动时都会被拒绝。外部访问请在前面挂 TLS 反向代理，回指本监听地址。
 
