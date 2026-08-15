@@ -3,7 +3,7 @@
  *
  * A token-auth reverse proxy in front of the dsh web webserver:
  *
- *   browser ──► auth proxy :8443 (0.0.0.0) ──► dsh webserver 127.0.0.1:3080
+ *   browser ──► auth proxy :8443 (127.0.0.1) ──► dsh webserver 127.0.0.1:3080
  *                  ├─ unauthenticated → built-in login page
  *                  ├─ POST token → HttpOnly session cookie
  *                  └─ authenticated → forward HTTP + WebSocket upgrade
@@ -13,6 +13,12 @@
  * browser still sees one same-origin server. Nothing in the dsh source is
  * modified: the dsh webserver itself stays on 127.0.0.1, and this plugin
  * owns the network-facing socket.
+ *
+ * The proxy offers no TLS, so it refuses to bind a wildcard or public
+ * address: the default listen host is 127.0.0.1, and only loopback and
+ * private/LAN addresses are accepted (listenHostIssue). External access
+ * must terminate TLS in front (reverse proxy), pointing back at the
+ * loopback listener.
  *
  * Sessions never expire by design (10-year cookie Max-Age) and live in
  * memory, so restarting dsh logs everyone out. The token is
@@ -81,7 +87,7 @@ export interface Config {
 
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
-  host: z.string().default('0.0.0.0'),
+  host: z.string().default('127.0.0.1'),
   port: z.natural().max(65535).required(),
   targetHost: z.string().default('127.0.0.1'),
   targetPort: z.natural().max(65535).default(3080),
@@ -111,7 +117,7 @@ function tokenConfigured(token: string): boolean {
   return trimmed !== '' && trimmed !== TOKEN_PLACEHOLDER
 }
 
-/** Non-internal IPv4 addresses, for logging reachable URLs when binding 0.0.0.0. */
+/** Non-internal IPv4 addresses, for logging reachable URLs when binding a wildcard. */
 function localAddresses(): string[] {
   const out: string[] = []
   for (const list of Object.values(networkInterfaces())) {
@@ -121,6 +127,35 @@ function localAddresses(): string[] {
     }
   }
   return out.sort()
+}
+
+/**
+ * The proxy offers no TLS, so binding a wildcard or public address would put
+ * the plaintext token on the open network. Only loopback and private/LAN
+ * addresses are acceptable listen hosts. Returns a human-readable reason when
+ * the host is not allowed, null when it is.
+ */
+function listenHostIssue(host: string): string | null {
+  let h = host.trim().toLowerCase()
+  if (h === '') return '监听地址不能为空'
+  if (h === 'localhost') return null
+  if (h === '0.0.0.0' || h === '::') {
+    return '禁止监听通配地址（无 TLS，会把明文令牌暴露到整个网络）；请改为回环或内网地址'
+  }
+  if (h === '::1') return null
+  if (h.startsWith('::ffff:')) h = h.slice('::ffff:'.length)
+  const octets = h.split('.').map(Number)
+  if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) {
+    return '监听地址必须是回环或内网 IP（主机名除 localhost 外不支持）'
+  }
+  const [a, b] = octets
+  const privateOrLocal =
+    a === 10 || a === 127
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 169 && b === 254)
+  if (!privateOrLocal) return '禁止监听公网 IP（无 TLS，令牌会明文暴露）；仅允许回环与内网地址'
+  return null
 }
 
 /** User-editable config document (~/.dsh/dsh-auth-proxy.json). */
@@ -370,7 +405,7 @@ function readBody(req: IncomingMessage, cap = 64 * 1024): Promise<string> {
 /** Schema defaults, re-read for hand-built test contexts (the loader applies them normally). */
 const DEFAULTS: Resolved = {
   enabled: true,
-  host: '0.0.0.0',
+  host: '127.0.0.1',
   port: 8443,
   targetHost: '127.0.0.1',
   targetPort: 3080,
@@ -469,7 +504,11 @@ export function apply(ctx: Context, config?: Config): void {
   const sync = (): void => {
     const next = resolve()
     const wasListening = server !== undefined
-    const shouldListen = next.enabled && tokenConfigured(next.token)
+    // No TLS: never bind a wildcard or public address even if the config says
+    // so (the PUT handler already rejects it, but a stale user file can hold
+    // an old 0.0.0.0) — such a host keeps the proxy disabled.
+    const hostIssue = listenHostIssue(next.host)
+    const shouldListen = next.enabled && tokenConfigured(next.token) && hostIssue === null
     const bindChanged = next.host !== live.host || next.port !== live.port
     const stateChanged = wasListening !== shouldListen
     live = next
@@ -482,6 +521,8 @@ export function apply(ctx: Context, config?: Config): void {
         announcedDisabled = true
         if (!tokenConfigured(next.token)) {
           ctx.logger.warn('dsh-auth-proxy: no token configured (empty or placeholder `change-me`) — proxy disabled (set `token` in the plugin config)')
+        } else if (hostIssue) {
+          ctx.logger.warn(`dsh-auth-proxy: refusing to listen on ${next.host}: ${hostIssue}`)
         } else {
           ctx.logger.info('dsh-auth-proxy: disabled')
         }
@@ -497,6 +538,8 @@ export function apply(ctx: Context, config?: Config): void {
       announcedDisabled = true
       if (!tokenConfigured(next.token)) {
         ctx.logger.warn('dsh-auth-proxy: no token configured (empty or placeholder `change-me`) — proxy disabled (set `token` in the plugin config)')
+      } else if (hostIssue) {
+        ctx.logger.warn(`dsh-auth-proxy: refusing to listen on ${next.host}: ${hostIssue}`)
       } else {
         ctx.logger.info('dsh-auth-proxy: disabled')
       }
@@ -824,6 +867,12 @@ export function apply(ctx: Context, config?: Config): void {
             Config(probe)
           } catch (err) {
             writeJson(res, 400, { error: `invalid config: ${String(err)}` })
+            return
+          }
+          // No TLS: a wildcard or public listen host is refused outright.
+          const hostIssue = listenHostIssue(merged.host ?? DEFAULTS.host)
+          if (hostIssue) {
+            writeJson(res, 400, { error: 'invalid-config', detail: hostIssue })
             return
           }
           fileConfig = merged

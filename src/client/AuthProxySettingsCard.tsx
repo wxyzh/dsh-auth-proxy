@@ -157,13 +157,14 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
   const [loadError, setLoadError] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveFailed, setSaveFailed] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
   const [cfg, setCfg] = useState<ConfigView | null>(null)
   const [tokenDraft, setTokenDraft] = useState('')
 
   // One form value per editable field, staged as strings.
   const [enabled, setEnabled] = useState(true)
-  const [host, setHost] = useState('0.0.0.0')
+  const [host, setHost] = useState('127.0.0.1')
   const [port, setPort] = useState('8443')
   const [targetHost, setTargetHost] = useState('127.0.0.1')
   const [targetPort, setTargetPort] = useState('3080')
@@ -204,11 +205,12 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
     return () => { cancelled = true }
   }, [])
 
-  const mark = (): void => { setDirty(true); setSaveFailed(false) }
+  const mark = (): void => { setDirty(true); setSaveFailed(false); setSaveError(null) }
 
   const save = async (): Promise<void> => {
     setSaving(true)
     setSaveFailed(false)
+    setSaveError(null)
     const payload: Record<string, unknown> = {
       enabled,
       host,
@@ -229,14 +231,15 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
         body: JSON.stringify(payload),
       })
       if (!res.ok) {
-        const body = await res.json().catch(() => null) as { error?: string } | null
-        throw new Error(body?.error ?? String(res.status))
+        const body = await res.json().catch(() => null) as { error?: string; detail?: string } | null
+        throw new Error(body?.detail ?? body?.error ?? String(res.status))
       }
       setDirty(false)
       setTokenDraft('')
       setCfg((prev) => prev ? { ...prev, ...payload as unknown as Partial<ConfigView> } : prev)
-    } catch {
+    } catch (err) {
       setSaveFailed(true)
+      setSaveError(err instanceof Error ? err.message : String(err))
     } finally {
       setSaving(false)
     }
@@ -258,6 +261,7 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
     setTokenDraft('')
     setDirty(false)
     setSaveFailed(false)
+    setSaveError(null)
   }
 
   const ui = styles
@@ -341,7 +345,7 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
                     <Field label={t('fields.maxFailures')} numeric value={maxFailures} onChange={(v) => { setMaxFailures(v); mark() }} width="half" />
                     <Field label={t('fields.lockoutMinutes')} numeric value={lockoutMinutes} onChange={(v) => { setLockoutMinutes(v); mark() }} width="half" />
                   </div>
-                  {saveFailed ? <p style={ui.error}>{t('settings.saveFailed')}</p> : null}
+                  {saveFailed ? <p style={ui.error}>{saveError ?? t('settings.saveFailed')}</p> : null}
                   <div style={ui.footer}>
                     <button type="button" style={{ ...ui.button, ...ui.discard }} disabled={!dirty || saving} onClick={discard}>
                       {t('settings.discard')}

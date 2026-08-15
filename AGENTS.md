@@ -1,6 +1,6 @@
 # AGENTS.md — dsh-auth-proxy
 
-dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `0.0.0.0:<port>` 独占网络面，内置登录页校验静态令牌后，
+dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`（默认）监听，内置登录页校验静态令牌后，
 把 HTTP + WebSocket 转发到回环 dsh webserver（默认 `127.0.0.1:3080`）；浏览器侧在「设置 > 插件配置」
 渲染配置卡片。主仓（DSH 源码 checkout）**零改动**：webserver 保持在 127.0.0.1，本插件持有对外 socket。
 
@@ -31,6 +31,10 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `0.0.0.0:<port>` �
 - **配置分层（勿改回）**：解析 = `base` 层（dsh-settings scope，无 settings 服务时退化为组合入口）+ 用户文件
   `~/.dsh/dsh-auth-proxy.json`（文件层**权威**）。卡片 PUT 只写文件、只更新 `fileConfig`，**不得重指 `current`**；
   `installSettingsSection` 的 `setSource` 只换 `base` 层。文件层是唯一持久存储，重启生效。
+- **监听地址（勿放开）**：无 TLS，`listenHostIssue()`（`src/index.ts`）只允许回环与内网地址
+  （`127/8`、`10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`::1`，`localhost`），
+  **拒绝 `0.0.0.0`、`::` 与公网 IP**——默认 `127.0.0.1`，外部访问须用 TLS 反向代理回指监听地址。
+  PUT 与 `sync()` 双重拒绝，禁止放宽。
 - **`sync()` 两态**：仅 `host`/`port`/监听状态变化才重建服务器（`teardownServer` 优雅关闭：
   `close()` + 1.5s 兜底强关）；其余字段（token、banner、accessUrls、白名单、锁定）热更新，只换 `live` 快照。
   PUT 处理器**先写响应再 `setImmediate(sync)`**，保证保存响应先于重建到达浏览器。
@@ -46,7 +50,8 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `0.0.0.0:<port>` �
 ## 已知边界（勿当 bug 误修）
 
 - IP 白名单仅 IPv4（IPv6 字面量如 `::1` 不匹配 IPv4 CIDR）。
-- 无 TLS：令牌经明文 HTTP 传输，局域网内可嗅探——这是为局域网 HTTP 可用性（UUID polyfill）做的取舍。
+- 无 TLS：令牌经明文 HTTP 传输，同网段可嗅探——这是为局域网 HTTP 可用性（UUID polyfill）做的取舍；
+  监听地址已限制为回环/内网（见上），禁止放宽。
 - 会话**永久有效**（cookie Max-Age 10 年）：条目随登录数线性增长，重启清零，属预期；失败计数表由定时清理兜底。
 - 当前目录已是 git 仓库（初始提交已建）；改动前先确认状态，`lib/` 是构建产物。
 

@@ -285,5 +285,25 @@ const tick = () => new Promise((r) => setImmediate(r))
   s.closeAll()
 }
 
+// ── 7. listen host policy: no TLS -> wildcard/public refused ────────────
+{
+  console.log('scenario 8: listen host policy')
+  const s = scenario()
+  const p = await freePort()
+  // No host given: the default must be 127.0.0.1 (loopback).
+  apply(s.ctx, { enabled: true, port: p, targetPort: 9, token: 's3cret' })
+  ok((await canConnect(p)) === true, `default listen host 127.0.0.1 -> listening on ${p}`)
+  const route = s.configRoute()
+  ok(route !== undefined, 'config API route registered')
+
+  for (const bad of ['0.0.0.0', '::', '8.8.8.8', '203.0.113.9', 'example.com']) {
+    const r = await callApi(route, 'PUT', { host: bad })
+    ok(r.status === 400, `PUT host ${bad} -> 400 rejected (no TLS)`)
+  }
+  const lan = await callApi(route, 'PUT', { host: '192.168.1.50' })
+  ok(lan.status === 200, 'PUT host 192.168.1.50 -> 200 accepted (private LAN)')
+  s.closeAll()
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed === 0 ? 0 : 1)

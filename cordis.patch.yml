@@ -2,11 +2,16 @@
 # web profile roster. Activate with
 #   dsh plugin --profile web add link:<abs path>/dsh-auth-proxy
 #
-# The plugin is host-only (no client half): it owns the network-facing
-# socket (0.0.0.0:8443), shows the built-in login page, and forwards
+# The plugin is host-only (no client half): it owns the listen socket
+# (127.0.0.1:8443 by default), shows the built-in login page, and forwards
 # authenticated HTTP + WebSocket traffic to the loopback webserver. The
 # webserver itself stays on 127.0.0.1, so no dsh source or --host flag is
 # needed.
+#
+# SECURITY: the proxy offers no TLS, so the listen host must be loopback or a
+# private/LAN address — 0.0.0.0, :: and public IPs are refused (see
+# listenHostIssue). For external access, terminate TLS in front (reverse
+# proxy) and keep this listener on 127.0.0.1.
 #
 # All values below are also editable live in the Web UI under
 # Settings > Plugin config > dsh-auth-proxy (dsh-settings service).
@@ -20,7 +25,7 @@
       name: '@ken/dsh-auth-proxy'
       config:
         enabled: true
-        host: '0.0.0.0'
+        host: '127.0.0.1'
         port: 8443
         targetHost: '127.0.0.1'
         targetPort: 3080
