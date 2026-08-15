@@ -10,6 +10,12 @@
  *      any rebuild (fix #3), and the proxy keeps serving on the same port
  *   5. PUT port change rebuilds and the new port listens
  *   6. PUT token='change-me' disables the proxy
+ *   7. listen host policy: wildcard/public refused, private LAN accepted
+ *   8. forwarded HTML carries both the UUID polyfill and the loopback-compat
+ *      shim (web-ui settings stay editable behind the proxy)
+ *   9. stateless sessions: a cookie issued by one instance authenticates
+ *      against a brand-new instance (restart survival, no session table),
+ *      and changing the token invalidates every issued cookie (global logout)
  *
  * Run: node scripts/smoke.mjs
  */
@@ -303,6 +309,78 @@ const tick = () => new Promise((r) => setImmediate(r))
   const lan = await callApi(route, 'PUT', { host: '192.168.1.50' })
   ok(lan.status === 200, 'PUT host 192.168.1.50 -> 200 accepted (private LAN)')
   s.closeAll()
+}
+
+// ── 8. forwarded HTML carries both injected scripts ─────────────────────
+{
+  console.log('scenario 9: HTML injection (UUID polyfill + loopback compat)')
+  const upstream = httpCreateServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end('<!doctype html><html><head><title>x</title></head><body>ok</body></html>')
+  })
+  const up = await new Promise((resolve, reject) => {
+    upstream.on('error', reject)
+    upstream.listen(0, '127.0.0.1', () => resolve(upstream.address().port))
+  })
+  const s = scenario()
+  const p = await freePort()
+  apply(s.ctx, { enabled: true, host: '127.0.0.1', port: p, targetPort: up, token: 's3cret' })
+  ok((await canConnect(p)) === true, `listening on ${p}`)
+
+  const good = await httpPost(p, '/__dsh_auth/login', 'token=s3cret')
+  const cookie = good.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
+  const page = await httpGet(p, '/', { cookie })
+  ok(page.status === 200 && String(page.headers['content-type']).includes('text/html'),
+    'authenticated HTML forwarded from upstream')
+  ok(page.body.includes('crypto.randomUUID') && page.body.includes('dsh-client-connection'),
+    'HTML carries the UUID polyfill and the loopback-compat shim')
+  ok(page.body.includes('isLoopback') && page.body.includes('__ModuleLoader__'),
+    'compat shim targets the client connection loopback flag')
+  s.closeAll()
+  await new Promise((r) => upstream.close(r))
+}
+
+// ── 9. stateless sessions: restart survival + token rotation = global logout ──
+{
+  console.log('scenario 10: stateless session (restart survival + token rotation)')
+  // First "process": login and capture the signed cookie.
+  const s1 = scenario()
+  const p1 = await freePort()
+  apply(s1.ctx, { enabled: true, host: '127.0.0.1', port: p1, targetPort: 9, token: 's3cret' })
+  ok((await canConnect(p1)) === true, `first instance listening on ${p1}`)
+  const good = await httpPost(p1, '/__dsh_auth/login', 'token=s3cret')
+  const cookie = good.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
+  ok(good.status === 302 && cookie.startsWith('dsh_auth_session='), 'login -> 302 + session cookie')
+  ok(cookie.includes('.'), 'cookie is signed (payload.signature format)')
+  s1.closeAll()
+
+  // Second "process": a brand-new plugin instance with zero session memory.
+  const s2 = scenario()
+  const p2 = await freePort()
+  apply(s2.ctx, { enabled: true, host: '127.0.0.1', port: p2, targetPort: 9, token: 's3cret' })
+  ok((await canConnect(p2)) === true, `restarted instance listening on ${p2}`)
+  const fwd = await httpGet(p2, '/api/whatever', { cookie })
+  ok(fwd.status === 502, 'cookie from the old instance still authenticates after restart (502 = forwarded)')
+  const unauth = await httpGet(p2, '/api/whatever')
+  ok(unauth.status === 401, 'no cookie -> still 401')
+
+  // Token rotation = global logout: the old cookie must stop working.
+  const route = s2.configRoute()
+  const res = await callApi(route, 'PUT', { token: 'newtok' })
+  ok(res.status === 200 && JSON.parse(res.body).tokenSet === true, 'PUT token -> 200 ok')
+  await tick()
+  await tick()
+  const after = await httpGet(p2, '/api/whatever', { cookie })
+  ok(after.status === 401, 'old cookie rejected after token change (global logout)')
+
+  // The new token logs in fine and its cookie authenticates.
+  const again = await httpPost(p2, '/__dsh_auth/login', 'token=newtok')
+  ok(again.status === 302 && (again.headers['set-cookie']?.[0] ?? '').includes('dsh_auth_session='),
+    'login with the new token works')
+  const fresh = again.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
+  const againFwd = await httpGet(p2, '/api/whatever', { cookie: fresh })
+  ok(againFwd.status === 502, 'cookie issued after rotation authenticates (502 = forwarded)')
+  s2.closeAll()
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

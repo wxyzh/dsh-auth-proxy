@@ -27,7 +27,10 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`�
 - **令牌**：`tokenConfigured()` 判定空串或占位符 `change-me` 为未配置，此时 `sync()` 禁用代理、绝不监听；
   登录比对必须走 `safeEqual()`（SHA-256 + `timingSafeEqual`）；schema 中 token 带 `role('secret')`，
   `GET /api/dsh-auth-proxy/config` 永不回传令牌值，只回 `tokenSet` 布尔。
-- **会话**：cookie `HttpOnly; SameSite=Lax; Path=/`，**永久有效**（Max-Age 10 年）；存内存、重启即清；失败计数由定时清理兜底（30 分钟扫描，闲置超 1 小时清除）。
+- **会话**：cookie `HttpOnly; SameSite=Lax; Path=/`，**永久有效**（Max-Age 10 年）且**无状态**：
+  值为 `payload.signature`（HMAC-SHA256，密钥由令牌 `hash(token)` 派生，见 `src/index.ts` 的 `issueSession`/`isValidSession`），
+  服务端不存会话表，**重启后 cookie 仍有效**；**更换令牌 = 全体下线**（密钥变化令全部旧签名失效），登出仅清客户端 cookie；
+  失败计数由定时清理兜底（30 分钟扫描，闲置超 1 小时清除）。
 - **配置分层（勿改回）**：解析 = `base` 层（dsh-settings scope，无 settings 服务时退化为组合入口）+ 用户文件
   `~/.dsh/dsh-auth-proxy.json`（文件层**权威**）。卡片 PUT 只写文件、只更新 `fileConfig`，**不得重指 `current`**；
   `installSettingsSection` 的 `setSource` 只换 `base` 层。文件层是唯一持久存储，重启生效。
@@ -42,6 +45,12 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`�
   因此监听/禁用等操作者必须看到的状态用 `say()` / `sayWarn()`（`src/index.ts`：`ctx.logger` + `console.log`
   双写镜像）输出，格式前缀 `dsh-auth-proxy: `；禁止把请求级日志（debug 等）改成 console.log 刷屏。
 - **请求处理器一律读 `live` 快照**（每请求 `const c = live`），禁止闭包捕获 `sync()` 时的 cfg 快照。
+- **浏览器侧信任镜像（勿移除）**：HTML 注入除 `crypto.randomUUID` polyfill 外还有
+  `LOOPBACK_COMPAT_SCRIPT`（`src/index.ts`）——dsh web 客户端按页面源判定回环，非回环来源把设置面
+  降级为只读；而代理把 Host/Origin 改回回环后服务端本就把代理流量当回环放行（含 privileged
+  settings/credentials 方法）。该脚本在 `@deepseek-ai/dsh-client-connection` 提供服务后把
+  `connection.isLoopback` 置 true，让 web-ui 设置（主题/语言/插件配置）在代理后可编辑。鉴权仍由本插件
+  令牌墙把关，脚本不新增攻击面。
 
 ## 客户端纪律
 
@@ -55,7 +64,8 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`�
 - IP 白名单仅 IPv4（IPv6 字面量如 `::1` 不匹配 IPv4 CIDR）。
 - 无 TLS：令牌经明文 HTTP 传输，同网段可嗅探——这是为局域网 HTTP 可用性（UUID polyfill）做的取舍；
   监听地址已限制为回环/内网（见上），禁止放宽。
-- 会话**永久有效**（cookie Max-Age 10 年）：条目随登录数线性增长，重启清零，属预期；失败计数表由定时清理兜底。
+- 会话**永久有效**（cookie Max-Age 10 年）且**无状态**（HMAC 签名，密钥派生自令牌）：重启不失效；
+  **无单点剔除**，改令牌即全体下线、登出仅清 cookie，属预期；失败计数表由定时清理兜底。
 - 当前目录已是 git 仓库（初始提交已建）；改动前先确认状态，`lib/` 是构建产物。
 
 ## 提交前检查

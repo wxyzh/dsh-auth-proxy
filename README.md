@@ -16,10 +16,16 @@ browser ──► auth proxy :8443 (127.0.0.1) ──► dsh webserver 127.0.0.1
 
 - 内置登录页（POST `/__dsh_auth/login` 校验令牌），登出走 POST `/__dsh_auth/logout`。
 - 令牌比对使用 SHA-256 + `timingSafeEqual`，避免时序侧信道。
-- 会话 cookie：`HttpOnly; SameSite=Lax; Path=/`，**永久有效**（Max-Age 10 年）；会话存内存，重启 dsh 后所有人需重新登录。
+- 会话 cookie：`HttpOnly; SameSite=Lax; Path=/`，**永久有效**（Max-Age 10 年）且**无状态**：
+  值为 `payload.signature`（HMAC-SHA256，密钥由令牌派生），服务端不存会话，**重启后 cookie 依然有效**；
+  **更换令牌会使所有已登录会话立即失效**（全体下线），登出仅清除客户端 cookie。
 - IP 白名单（支持 CIDR，IPv4）可整体绕过令牌；失败登录锁定（按 IP，阈值与时长可配）。
 - 配置实时可改：Web UI「设置 > 插件配置」卡片（走插件自有 `/api/dsh-auth-proxy/config`），
   无需改文件；对纯 HTTP 局域网地址自动注入 `crypto.randomUUID` polyfill，保证前端 RPC 可用。
+- 局域网地址可正常编辑 web-ui 设置（主题、语言、插件配置等）：dsh web 客户端按页面源判定回环，
+  非回环来源会把设置面降级为只读；代理转发 HTML 时注入 loopback-compat 脚本，把
+  `connection.isLoopback` 打开——与代理把 Host/Origin 改回回环后服务端按回环放行的事实一致，
+  鉴权仍由本插件令牌墙把关。
 - 状态可视：宿主终端直接打印 `dsh-auth-proxy: listening on http://<host>:<port>`（console.log 镜像，
   dsh web 不把插件 `ctx.logger` 打到终端），设置卡片同样显示实际监听地址；通过 `accessUrls` 声明的
   入口地址（可含 HTTPS 域名）会展示在卡片与登录页，多域名场景一眼可知该用哪个 URL。
@@ -75,7 +81,8 @@ token: !!js process.env.DSH_AUTH_TOKEN
   （nginx/Caddy 等）终止加密后回指 `127.0.0.1:8443`，`accessUrls` 里填对外域名。
 - 无 TLS：即使仅内网监听，令牌仍经明文 HTTP 传输，同网段可嗅探。这是为局域网 HTTP 可用性做的取舍；
   需要加密传输时请在前方套 TLS 终结。
-- 会话存内存、**永久有效**（重启 dsh 即清，所有人需重新登录）；失败计数由定时清理兜底（每 30 分钟扫描，闲置超 1 小时的记录清除）。锁定为按 IP，IPv6 字面量（如 `::1`）不匹配 IPv4 白名单。
+- 会话为**无状态签名 cookie**（HMAC 密钥派生自令牌，重启不失效）；**无单点剔除能力**——更换令牌即全体下线，
+  登出仅清客户端 cookie；失败计数由定时清理兜底（每 30 分钟扫描，闲置超 1 小时的记录清除）。锁定为按 IP，IPv6 字面量（如 `::1`）不匹配 IPv4 白名单。
 
 ## 开发
 
@@ -86,6 +93,6 @@ token: !!js process.env.DSH_AUTH_TOKEN
 
 ## 已知限制
 
-- 会话永久有效：条目随登录数线性增长（重启清零，属预期）；失败计数表由定时清理兜底。
+- 会话永久有效且无状态（签名 cookie，重启不失效）；**无单点剔除**，改令牌即全体下线、登出仅清 cookie，属预期；失败计数表由定时清理兜底。
 - `ws` 依赖当前未被引用（清理项）。
 - 当前目录已是 git 仓库（初始提交已建）。

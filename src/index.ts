@@ -20,8 +20,12 @@
  * must terminate TLS in front (reverse proxy), pointing back at the
  * loopback listener.
  *
- * Sessions never expire by design (10-year cookie Max-Age) and live in
- * memory, so restarting dsh logs everyone out. The token is
+ * Sessions are stateless: the cookie carries a random payload signed with
+ * HMAC-SHA256 keyed by the configured token (`payload.signature`), so they
+ * never expire (10-year Max-Age) AND survive restarts — there is no
+ * server-side session table to lose. Rotating the token changes the signing
+ * key and invalidates every issued cookie at once (global logout); logout
+ * merely clears the client cookie. The token is
  * read from config (e.g. `!!js process.env.DSH_AUTH_TOKEN`) and compared
  * with a timing-safe hash; an empty token — or the placeholder `change-me`
  * from the bundle patch — disables the proxy entirely, never a listening
@@ -32,7 +36,7 @@
  * so changes saved from the card survive restarts.
  */
 
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath } from 'node:path'
@@ -172,13 +176,10 @@ function saveConfigFile(value: Partial<Config>): void {
   renameSync(tmp, file)
 }
 
-/** In-memory session store: sid -> expiry (ms since epoch). Sessions never expire by design. */
-const sessions = new Map<string, number>()
-
 /** In-memory failed-login counter per IP: ip -> { count, lockUntil?, lastFailAt }. */
 const failures = new Map<string, { count: number; lockUntil?: number; lastFailAt: number }>()
 
-/** Sessions are permanent: cookie Max-Age 10 years. */
+/** Sessions are stateless signed cookies: browser-side Max-Age 10 years. */
 const SESSION_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000
 
 /** Periodic sweep cadence and the idle window after which failure records drop. */
@@ -267,24 +268,32 @@ function recordFailure(ip: string, maxFailures: number, lockoutMinutes: number):
   failures.set(ip, rec)
 }
 
-function isValidSession(req: IncomingMessage): boolean {
-  const sid = parseCookies(req)[COOKIE_NAME]
-  if (!sid) return false
-  const expiry = sessions.get(sid)
-  if (expiry === undefined) return false
-  if (expiry < Date.now()) {
-    sessions.delete(sid)
-    return false
-  }
-  return true
+/**
+ * Stateless session cookies: `payload.signature` where payload is a random
+ * nonce and signature is HMAC-SHA256 over it, keyed by the configured token.
+ * The server keeps no session table, so cookies survive restarts; rotating
+ * the token changes the key and invalidates every issued cookie at once
+ * (global logout). There is no per-client revocation — logout only clears
+ * the client cookie.
+ */
+const sessionKey = (token: string): Buffer => hash(token)
+
+function issueSession(res: ServerResponse, token: string): void {
+  const payload = randomBytes(24).toString('base64url')
+  const signature = createHmac('sha256', sessionKey(token)).update(payload).digest('base64url')
+  res.setHeader('Set-Cookie', [
+    `${COOKIE_NAME}=${payload}.${signature}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+  ])
 }
 
-function issueSession(res: ServerResponse): void {
-  const sid = randomBytes(24).toString('base64url')
-  sessions.set(sid, Date.now() + SESSION_TTL_MS)
-  res.setHeader('Set-Cookie', [
-    `${COOKIE_NAME}=${sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
-  ])
+function isValidSession(req: IncomingMessage, token: string): boolean {
+  const cookie = parseCookies(req)[COOKIE_NAME]
+  if (!cookie) return false
+  const idx = cookie.lastIndexOf('.')
+  if (idx <= 0 || idx === cookie.length - 1) return false
+  const expected = createHmac('sha256', sessionKey(token)).update(cookie.slice(0, idx)).digest()
+  const given = Buffer.from(cookie.slice(idx + 1), 'base64url')
+  return given.length === expected.length && timingSafeEqual(given, expected)
 }
 
 /**
@@ -308,6 +317,72 @@ const UUID_POLYFILL = `<script>
     for (var i = 0; i < 16; i++) h += buf[i].toString(16).padStart(2, '0');
     return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   };
+})();
+<\/script>`
+
+/**
+ * Injected into every forwarded HTML response beside the UUID polyfill. dsh
+ * web's browser half classifies the connection by the page origin: a
+ * non-loopback origin is treated as a remote browser, and the whole settings
+ * plane goes read-only — every settingsScope-bound surface (theme, language,
+ * composer policy, the plugin-configuration cards) constructs "memory"
+ * persistence and can no longer be modified.
+ *
+ * Through this proxy that classification is wrong: the socket terminates on
+ * the loopback webserver, Host/Origin are rewritten back to the loopback
+ * target, and the /api Host fence (the privileged settings/credentials
+ * methods included) already treats every request as loopback. Forcing the
+ * client flag open simply mirrors what the server already grants; the proxy
+ * itself remains the token-auth edge.
+ *
+ * The script wraps window.__ModuleLoader__.load and, for the
+ * @deepseek-ai/dsh-client-connection bundle, wraps its apply() so the
+ * connection handle's isLoopback is forced open right after the service is
+ * provided — before any consumer plugin binds a settings scope, whatever the
+ * plugin load order is.
+ */
+const LOOPBACK_COMPAT_SCRIPT = `<script>
+(function () {
+  try {
+    var realLoader = undefined;
+    var installed = false;
+    Object.defineProperty(globalThis, '__ModuleLoader__', {
+      configurable: true,
+      enumerable: true,
+      get: function () { return realLoader; },
+      set: function (loader) {
+        if (installed) { realLoader = loader; return; }
+        installed = true;
+        var originalLoad = loader.load.bind(loader);
+        loader.load = function (entry) {
+          if (entry && typeof entry === 'object'
+              && entry.id === '@deepseek-ai/dsh-client-connection'
+              && typeof entry.factory === 'function') {
+            var originalFactory = entry.factory;
+            entry.factory = function (require) {
+              var exports = originalFactory(require);
+              if (exports && typeof exports.apply === 'function') {
+                var originalApply = exports.apply;
+                exports.apply = function (ctx) {
+                  var result = originalApply.apply(this, arguments);
+                  try {
+                    var handle = ctx && typeof ctx.get === 'function' ? ctx.get('connection') : undefined;
+                    if (handle && typeof handle === 'object' && handle.isLoopback === false) {
+                      handle.isLoopback = true;
+                    }
+                  } catch (err) { /* keep the read-only behavior on failure */ }
+                  return result;
+                };
+              }
+              return exports;
+            };
+          }
+          return originalLoad(entry);
+        };
+        realLoader = loader;
+      }
+    });
+  } catch (err) { /* keep the read-only behavior on failure */ }
 })();
 <\/script>`
 
@@ -615,13 +690,13 @@ export function apply(ctx: Context, config?: Config): void {
           upstream.pipe(res)
           return
         }
-        // Buffer HTML so we can inject the polyfill before </head>.
+        // Buffer HTML so we can inject the polyfills before </head>.
         const chunks: Buffer[] = []
         upstream.on('data', (c: Buffer) => chunks.push(c))
         upstream.on('end', () => {
           let body = Buffer.concat(chunks).toString('utf8')
           if (body.includes('</head>')) {
-            body = body.replace('</head>', `${UUID_POLYFILL}\n</head>`)
+            body = body.replace('</head>', `${UUID_POLYFILL}\n${LOOPBACK_COMPAT_SCRIPT}\n</head>`)
           }
           const out = Buffer.from(body, 'utf8')
           const headersOut = { ...upstream.headers } as Record<string, string | string[] | number | undefined>
@@ -670,7 +745,7 @@ export function apply(ctx: Context, config?: Config): void {
           const token = new URLSearchParams(body).get('token') ?? ''
           if (safeEqual(token, c.token)) {
             failures.delete(ip)
-            issueSession(res)
+            issueSession(res, c.token)
             res.writeHead(302, { location: '/' })
             res.end()
           } else {
@@ -686,14 +761,14 @@ export function apply(ctx: Context, config?: Config): void {
       }
 
       if (pathname === logoutPath && req.method === 'POST') {
-        const sid = parseCookies(req)[COOKIE_NAME]
-        if (sid) sessions.delete(sid)
+        // Stateless session: there is nothing to revoke server-side — just
+        // expire the client cookie.
         res.writeHead(302, { location: '/', 'set-cookie': `${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0` })
         res.end()
         return
       }
 
-      if (!isValidSession(req)) {
+      if (!isValidSession(req, c.token)) {
         // API calls get a JSON 401 (fetch-friendly); page navigations get a redirect.
         if (pathname.startsWith('/api/') || pathname === '/api') {
           res.writeHead(401, { 'content-type': 'application/json' })
@@ -723,7 +798,7 @@ export function apply(ctx: Context, config?: Config): void {
         doUpgrade(req, socket, head)
         return
       }
-      if (isLockedOut(ip) || !isValidSession(req)) {
+      if (isLockedOut(ip) || !isValidSession(req, live.token)) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
         socket.destroy()
         return
@@ -896,13 +971,10 @@ export function apply(ctx: Context, config?: Config): void {
     }
   })
 
-  // Periodic sweep bounds the in-memory failure table. Sessions never expire
-  // by design, so they are only removed by logout or restart.
+  // Periodic sweep bounds the in-memory failure table. Sessions are
+  // stateless (signed cookies), so there is nothing server-side to expire.
   const sweepTimer = setInterval(() => {
     const now = Date.now()
-    for (const [sid, expiry] of sessions) {
-      if (expiry < now) sessions.delete(sid)
-    }
     for (const [ip, rec] of failures) {
       if ((rec.lockUntil !== undefined && rec.lockUntil < now) || now - rec.lastFailAt > FAILURE_IDLE_MS) {
         failures.delete(ip)
