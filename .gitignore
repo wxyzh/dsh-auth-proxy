@@ -1,0 +1,13 @@
+# 依赖与构建产物
+node_modules/
+lib/
+
+# npm 认证配置（含令牌引用，禁止提交）
+.npmrc
+
+# TypeScript 构建信息
+*.tsbuildinfo
+
+# 本地工具缓存
+*.log
+.DS_Store

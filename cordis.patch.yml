@@ -1,0 +1,32 @@
+# dsh-auth-proxy bundle patch: inserts the auth-proxy plugin row into the
+# web profile roster. Activate with
+#   dsh plugin --profile web add link:<abs path>/dsh-auth-proxy
+#
+# The plugin is host-only (no client half): it owns the network-facing
+# socket (0.0.0.0:8443), shows the built-in login page, and forwards
+# authenticated HTTP + WebSocket traffic to the loopback webserver. The
+# webserver itself stays on 127.0.0.1, so no dsh source or --host flag is
+# needed.
+#
+# All values below are also editable live in the Web UI under
+# Settings > Plugin config > dsh-auth-proxy (dsh-settings service).
+#
+# SECURITY: set the token via environment reference, not a literal:
+#   token: !!js process.env.DSH_AUTH_TOKEN
+# Until a real token is configured (empty or the placeholder 'change-me'),
+# the proxy stays DISABLED — it never listens with a well-known token.
+- insert:
+    - id: auth-proxy
+      name: '@ken/dsh-auth-proxy'
+      config:
+        enabled: true
+        host: '0.0.0.0'
+        port: 8443
+        targetHost: '127.0.0.1'
+        targetPort: 3080
+        token: !!js process.env.DSH_AUTH_TOKEN ?? 'change-me'
+        sessionTtlMinutes: 1440
+        banner: ''
+        allowedIps: []
+        maxFailures: 0
+        lockoutMinutes: 15
