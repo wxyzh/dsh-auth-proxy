@@ -16,7 +16,7 @@ browser ──► auth proxy :8443 (0.0.0.0) ──► dsh webserver 127.0.0.1:3
 
 - 内置登录页（POST `/__dsh_auth/login` 校验令牌），登出走 POST `/__dsh_auth/logout`。
 - 令牌比对使用 SHA-256 + `timingSafeEqual`，避免时序侧信道。
-- 会话 cookie：`HttpOnly; SameSite=Lax; Path=/`；会话存内存，重启 dsh 后所有人需重新登录。
+- 会话 cookie：`HttpOnly; SameSite=Lax; Path=/`，**永久有效**（Max-Age 10 年）；会话存内存，重启 dsh 后所有人需重新登录。
 - IP 白名单（支持 CIDR，IPv4）可整体绕过令牌；失败登录锁定（按 IP，阈值与时长可配）。
 - 配置实时可改：Web UI「设置 > 插件配置」卡片（走插件自有 `/api/dsh-auth-proxy/config`），
   无需改文件；对纯 HTTP 局域网地址自动注入 `crypto.randomUUID` polyfill，保证前端 RPC 可用。
@@ -42,7 +42,6 @@ dsh plugin --profile web add link:<abs 路径>/dsh-auth-proxy
 | `targetHost` | `127.0.0.1` | 回环转发目标 |
 | `targetPort` | `3080` | 回环转发端口 |
 | `token` | 见下 | 共享访问令牌 |
-| `sessionTtlMinutes` | `1440` | 会话时长（分钟） |
 | `banner` | `''` | 登录页横幅文案 |
 | `allowedIps` | `[]` | IP 白名单（如 `["127.0.0.1", "10.0.0.0/8"]`），空 = 一律要令牌 |
 | `maxFailures` | `0` | 失败锁定阈值（0 = 关闭锁定） |
@@ -66,7 +65,7 @@ token: !!js process.env.DSH_AUTH_TOKEN
   转发前剥离 `x-forwarded-for` / `x-real-ip`。
 - 无 TLS：令牌经明文 HTTP 传输，同网段可嗅探。这是为局域网 HTTP 可用性做的取舍；
   需要加密传输时请在前方套 TLS 终结。
-- 会话与失败计数存内存，重启即失；锁定为按 IP，IPv6 字面量（如 `::1`）不匹配 IPv4 白名单。
+- 会话存内存、**永久有效**（重启 dsh 即清，所有人需重新登录）；失败计数由定时清理兜底（每 30 分钟扫描，闲置超 1 小时的记录清除）。锁定为按 IP，IPv6 字面量（如 `::1`）不匹配 IPv4 白名单。
 
 ## 开发
 
@@ -77,6 +76,6 @@ token: !!js process.env.DSH_AUTH_TOKEN
 
 ## 已知限制
 
-- 会话/失败计数 Map 无主动清理，长期运行缓慢增长（可接受）。
+- 会话永久有效：条目随登录数线性增长（重启清零，属预期）；失败计数表由定时清理兜底。
 - `ws` 依赖当前未被引用（清理项）。
 - 当前目录尚未初始化 git 仓库。

@@ -195,6 +195,7 @@ const tick = () => new Promise((r) => setImmediate(r))
   const good = await httpPost(p, '/__dsh_auth/login', 'token=s3cret')
   const cookie = good.headers['set-cookie']?.[0] ?? ''
   ok(good.status === 302 && cookie.includes('dsh_auth_session='), 'right token -> 302 + session cookie')
+  ok(cookie.includes('Max-Age=315360000'), 'session cookie is permanent (10-year Max-Age)')
 
   const fwd = await httpGet(p, '/api/whatever', { cookie: cookie.split(';')[0] })
   ok(fwd.status === 502, 'authenticated request forwarded (502 upstream unavailable expected)')

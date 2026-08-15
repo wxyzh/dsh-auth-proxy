@@ -14,7 +14,8 @@
  * modified: the dsh webserver itself stays on 127.0.0.1, and this plugin
  * owns the network-facing socket.
  *
- * Sessions live in memory: restarting dsh logs everyone out. The token is
+ * Sessions never expire by design (10-year cookie Max-Age) and live in
+ * memory, so restarting dsh logs everyone out. The token is
  * read from config (e.g. `!!js process.env.DSH_AUTH_TOKEN`) and compared
  * with a timing-safe hash; an empty token — or the placeholder `change-me`
  * from the bundle patch — disables the proxy entirely, never a listening
@@ -27,8 +28,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
-import { clearTimeout, setTimeout } from 'node:timers'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import type { Duplex } from 'node:stream'
@@ -36,6 +36,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import z from 'schemastery'
+import { clearInterval, clearTimeout, setInterval, setTimeout } from 'node:timers'
 
 /** Stable cordis plugin name. */
 export const name = 'auth-proxy'
@@ -63,8 +64,6 @@ export interface Config {
   targetPort?: number
   /** The shared access token. Prefer an env reference: `!!js process.env.DSH_AUTH_TOKEN`. */
   token: string
-  /** Session lifetime in minutes. */
-  sessionTtlMinutes?: number
   /** Optional banner text shown on the login page. */
   banner?: string
   /** CIDR / IP allowlist bypassing the token (e.g. ["127.0.0.1", "10.0.0.0/8"]). Empty = token always required. */
@@ -82,7 +81,6 @@ export const Config: z<Config> = z.object({
   targetHost: z.string().default('127.0.0.1'),
   targetPort: z.natural().max(65535).default(3080),
   token: z.string().role('secret').default(''),
-  sessionTtlMinutes: z.natural().min(1).default(60 * 24),
   banner: z.string().default(''),
   allowedIps: z.array(z.string()).default([]),
   maxFailures: z.natural().default(0),
@@ -120,20 +118,27 @@ function loadConfigFile(): Partial<Config> | null {
   }
 }
 
-/** Persist the user config file (atomic-ish: write then replace). */
+/** Persist the user config file (tmp + atomic rename: a crash never leaves a half-written document). */
 function saveConfigFile(value: Partial<Config>): void {
   const file = configFilePath()
   mkdirSync(dirname(file), { recursive: true })
   const tmp = `${file}.tmp`
   writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8')
-  writeFileSync(file, JSON.stringify(value, null, 2), 'utf8')
+  renameSync(tmp, file)
 }
 
-/** In-memory session store: sid -> expiry (ms since epoch). */
+/** In-memory session store: sid -> expiry (ms since epoch). Sessions never expire by design. */
 const sessions = new Map<string, number>()
 
-/** In-memory failed-login counter per IP: ip -> { count, lockUntil? }. */
-const failures = new Map<string, { count: number; lockUntil?: number }>()
+/** In-memory failed-login counter per IP: ip -> { count, lockUntil?, lastFailAt }. */
+const failures = new Map<string, { count: number; lockUntil?: number; lastFailAt: number }>()
+
+/** Sessions are permanent: cookie Max-Age 10 years. */
+const SESSION_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000
+
+/** Periodic sweep cadence and the idle window after which failure records drop. */
+const SWEEP_INTERVAL_MS = 30 * 60 * 1000
+const FAILURE_IDLE_MS = 60 * 60 * 1000
 
 function hash(value: string): Buffer {
   return createHash('sha256').update(value).digest()
@@ -207,8 +212,9 @@ function isLockedOut(ip: string): boolean {
 
 function recordFailure(ip: string, maxFailures: number, lockoutMinutes: number): void {
   if (maxFailures <= 0) return
-  const rec = failures.get(ip) ?? { count: 0 }
+  const rec = failures.get(ip) ?? { count: 0, lastFailAt: 0 }
   rec.count += 1
+  rec.lastFailAt = Date.now()
   if (rec.count >= maxFailures) {
     rec.lockUntil = Date.now() + lockoutMinutes * 60_000
     rec.count = 0
@@ -228,11 +234,11 @@ function isValidSession(req: IncomingMessage): boolean {
   return true
 }
 
-function issueSession(res: ServerResponse, ttlMinutes: number): void {
+function issueSession(res: ServerResponse): void {
   const sid = randomBytes(24).toString('base64url')
-  sessions.set(sid, Date.now() + ttlMinutes * 60_000)
+  sessions.set(sid, Date.now() + SESSION_TTL_MS)
   res.setHeader('Set-Cookie', [
-    `${COOKIE_NAME}=${sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${ttlMinutes * 60}`,
+    `${COOKIE_NAME}=${sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
   ])
 }
 
@@ -336,7 +342,6 @@ const DEFAULTS: Resolved = {
   targetHost: '127.0.0.1',
   targetPort: 3080,
   token: '',
-  sessionTtlMinutes: 60 * 24,
   banner: '',
   allowedIps: [],
   maxFailures: 0,
@@ -371,7 +376,6 @@ export function apply(ctx: Context, config?: Config): void {
       targetHost: value.targetHost ?? DEFAULTS.targetHost,
       targetPort: value.targetPort ?? DEFAULTS.targetPort,
       token: value.token ?? DEFAULTS.token,
-      sessionTtlMinutes: value.sessionTtlMinutes ?? DEFAULTS.sessionTtlMinutes,
       banner: value.banner ?? DEFAULTS.banner,
       allowedIps: value.allowedIps ?? DEFAULTS.allowedIps,
       maxFailures: value.maxFailures ?? DEFAULTS.maxFailures,
@@ -432,7 +436,7 @@ export function apply(ctx: Context, config?: Config): void {
     const stateChanged = wasListening !== shouldListen
     live = next
 
-    // Hot update: non-socket config (token, banner, TTL, allowlist, lockout)
+    // Hot update: non-socket config (token, banner, allowlist, lockout)
     // takes effect on the next request via `live` — no rebuild, no dropped
     // connections, no dead WebSockets.
     if (!bindChanged && !stateChanged) {
@@ -582,7 +586,7 @@ export function apply(ctx: Context, config?: Config): void {
           const token = new URLSearchParams(body).get('token') ?? ''
           if (safeEqual(token, c.token)) {
             failures.delete(ip)
-            issueSession(res, c.sessionTtlMinutes)
+            issueSession(res)
             res.writeHead(302, { location: '/' })
             res.end()
           } else {
@@ -733,7 +737,6 @@ export function apply(ctx: Context, config?: Config): void {
             port: effective.port,
             targetHost: effective.targetHost,
             targetPort: effective.targetPort,
-            sessionTtlMinutes: effective.sessionTtlMinutes,
             banner: effective.banner,
             allowedIps: effective.allowedIps,
             maxFailures: effective.maxFailures,
@@ -764,7 +767,6 @@ export function apply(ctx: Context, config?: Config): void {
               targetHost: merged.targetHost ?? DEFAULTS.targetHost,
               targetPort: merged.targetPort ?? DEFAULTS.targetPort,
               token: merged.token ?? resolve().token ?? DEFAULTS.token,
-              sessionTtlMinutes: merged.sessionTtlMinutes ?? DEFAULTS.sessionTtlMinutes,
               banner: merged.banner ?? DEFAULTS.banner,
               allowedIps: merged.allowedIps ?? DEFAULTS.allowedIps,
               maxFailures: merged.maxFailures ?? DEFAULTS.maxFailures,
@@ -799,6 +801,22 @@ export function apply(ctx: Context, config?: Config): void {
       wctx.effect(() => wctx.webServer.register(route), 'dsh-auth-proxy: config api')
     }
   })
+
+  // Periodic sweep bounds the in-memory failure table. Sessions never expire
+  // by design, so they are only removed by logout or restart.
+  const sweepTimer = setInterval(() => {
+    const now = Date.now()
+    for (const [sid, expiry] of sessions) {
+      if (expiry < now) sessions.delete(sid)
+    }
+    for (const [ip, rec] of failures) {
+      if ((rec.lockUntil !== undefined && rec.lockUntil < now) || now - rec.lastFailAt > FAILURE_IDLE_MS) {
+        failures.delete(ip)
+      }
+    }
+  }, SWEEP_INTERVAL_MS)
+  sweepTimer.unref()
+  ctx.effect(() => () => clearInterval(sweepTimer), 'dsh-auth-proxy: sweep')
 
   // Initial registration from the composition entry (covers deployments with
   // no settings service, whose installSettingsSection never fires its hooks).

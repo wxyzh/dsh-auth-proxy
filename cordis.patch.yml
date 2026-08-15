@@ -25,7 +25,6 @@
         targetHost: '127.0.0.1'
         targetPort: 3080
         token: !!js process.env.DSH_AUTH_TOKEN ?? 'change-me'
-        sessionTtlMinutes: 1440
         banner: ''
         allowedIps: []
         maxFailures: 0

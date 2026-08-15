@@ -19,7 +19,6 @@ export type AuthProxyKey =
   | 'fields.targetPort'
   | 'fields.token'
   | 'fields.tokenHint'
-  | 'fields.sessionTtlMinutes'
   | 'fields.banner'
   | 'fields.allowedIps'
   | 'fields.maxFailures'
@@ -46,7 +45,6 @@ export const zh: Record<AuthProxyKey, string> = {
   'fields.targetPort': '目标端口',
   'fields.token': '访问令牌',
   'fields.tokenHint': '留空保持当前令牌不变',
-  'fields.sessionTtlMinutes': '会话时长（分钟）',
   'fields.banner': '登录页横幅',
   'fields.allowedIps': 'IP 白名单（逗号分隔，支持 CIDR）',
   'fields.maxFailures': '失败锁定阈值（0=关闭）',
@@ -74,7 +72,6 @@ export const en: Record<AuthProxyKey, string> = {
   'fields.targetPort': 'Target port',
   'fields.token': 'Access token',
   'fields.tokenHint': 'Leave empty to keep the current token',
-  'fields.sessionTtlMinutes': 'Session TTL (minutes)',
   'fields.banner': 'Login page banner',
   'fields.allowedIps': 'IP allowlist (comma-separated, CIDR supported)',
   'fields.maxFailures': 'Lockout threshold (0=off)',

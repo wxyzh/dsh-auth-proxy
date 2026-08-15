@@ -15,7 +15,6 @@ interface ConfigView {
   port: number
   targetHost: string
   targetPort: number
-  sessionTtlMinutes: number
   banner: string
   allowedIps: string[]
   maxFailures: number
@@ -145,7 +144,6 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
   const [port, setPort] = useState('8443')
   const [targetHost, setTargetHost] = useState('127.0.0.1')
   const [targetPort, setTargetPort] = useState('3080')
-  const [ttl, setTtl] = useState('1440')
   const [banner, setBanner] = useState('')
   const [allowedIps, setAllowedIps] = useState('')
   const [maxFailures, setMaxFailures] = useState('0')
@@ -166,7 +164,6 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
         setPort(String(view.port))
         setTargetHost(view.targetHost)
         setTargetPort(String(view.targetPort))
-        setTtl(String(view.sessionTtlMinutes))
         setBanner(view.banner)
         setAllowedIps((view.allowedIps ?? []).join(', '))
         setMaxFailures(String(view.maxFailures))
@@ -193,7 +190,6 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
       port: Number(port),
       targetHost,
       targetPort: Number(targetPort),
-      sessionTtlMinutes: Number(ttl),
       banner,
       allowedIps: allowedIps.split(',').map((s) => s.trim()).filter((s) => s !== ''),
       maxFailures: Number(maxFailures),
@@ -227,7 +223,6 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
       setPort(String(cfg.port))
       setTargetHost(cfg.targetHost)
       setTargetPort(String(cfg.targetPort))
-      setTtl(String(cfg.sessionTtlMinutes))
       setBanner(cfg.banner)
       setAllowedIps((cfg.allowedIps ?? []).join(', '))
       setMaxFailures(String(cfg.maxFailures))
@@ -291,10 +286,7 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
                     onChange={(v) => { setAllowedIps(v); mark() }}
                     hint={t('fields.allowedIps')}
                   />
-                  <div style={ui.row}>
-                    <Field label={t('fields.sessionTtlMinutes')} numeric value={ttl} onChange={(v) => { setTtl(v); mark() }} width="half" />
-                    <Field label={t('fields.banner')} value={banner} onChange={(v) => { setBanner(v); mark() }} width="half" />
-                  </div>
+                  <Field label={t('fields.banner')} value={banner} onChange={(v) => { setBanner(v); mark() }} />
                   <div style={ui.row}>
                     <Field label={t('fields.maxFailures')} numeric value={maxFailures} onChange={(v) => { setMaxFailures(v); mark() }} width="half" />
                     <Field label={t('fields.lockoutMinutes')} numeric value={lockoutMinutes} onChange={(v) => { setLockoutMinutes(v); mark() }} width="half" />

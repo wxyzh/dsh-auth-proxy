@@ -27,12 +27,12 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `0.0.0.0:<port>` �
 - **令牌**：`tokenConfigured()` 判定空串或占位符 `change-me` 为未配置，此时 `sync()` 禁用代理、绝不监听；
   登录比对必须走 `safeEqual()`（SHA-256 + `timingSafeEqual`）；schema 中 token 带 `role('secret')`，
   `GET /api/dsh-auth-proxy/config` 永不回传令牌值，只回 `tokenSet` 布尔。
-- **会话**：cookie `HttpOnly; SameSite=Lax; Path=/`；会话与失败计数在内存，重启即失（设计如此）。
+- **会话**：cookie `HttpOnly; SameSite=Lax; Path=/`，**永久有效**（Max-Age 10 年）；存内存、重启即清；失败计数由定时清理兜底（30 分钟扫描，闲置超 1 小时清除）。
 - **配置分层（勿改回）**：解析 = `base` 层（dsh-settings scope，无 settings 服务时退化为组合入口）+ 用户文件
   `~/.dsh/dsh-auth-proxy.json`（文件层**权威**）。卡片 PUT 只写文件、只更新 `fileConfig`，**不得重指 `current`**；
   `installSettingsSection` 的 `setSource` 只换 `base` 层。文件层是唯一持久存储，重启生效。
 - **`sync()` 两态**：仅 `host`/`port`/监听状态变化才重建服务器（`teardownServer` 优雅关闭：
-  `close()` + 1.5s 兜底强关）；其余字段（token、banner、TTL、白名单、锁定）热更新，只换 `live` 快照。
+  `close()` + 1.5s 兜底强关）；其余字段（token、banner、白名单、锁定）热更新，只换 `live` 快照。
   PUT 处理器**先写响应再 `setImmediate(sync)`**，保证保存响应先于重建到达浏览器。
 - **请求处理器一律读 `live` 快照**（每请求 `const c = live`），禁止闭包捕获 `sync()` 时的 cfg 快照。
 
@@ -47,8 +47,8 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `0.0.0.0:<port>` �
 
 - IP 白名单仅 IPv4（IPv6 字面量如 `::1` 不匹配 IPv4 CIDR）。
 - 无 TLS：令牌经明文 HTTP 传输，局域网内可嗅探——这是为局域网 HTTP 可用性（UUID polyfill）做的取舍。
-- 会话/失败计数 Map 无主动清理，长期运行缓慢增长（可接受）。
-- 当前目录尚未初始化 git 仓库；改动前先确认状态，`lib/` 是构建产物。
+- 会话**永久有效**（cookie Max-Age 10 年）：条目随登录数线性增长，重启清零，属预期；失败计数表由定时清理兜底。
+- 当前目录已是 git 仓库（初始提交已建）；改动前先确认状态，`lib/` 是构建产物。
 
 ## 提交前检查
 
