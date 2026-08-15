@@ -30,7 +30,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, networkInterfaces } from 'node:os'
 import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -68,6 +68,11 @@ export interface Config {
   banner?: string
   /** CIDR / IP allowlist bypassing the token (e.g. ["127.0.0.1", "10.0.0.0/8"]). Empty = token always required. */
   allowedIps?: string[]
+  /**
+   * Public entry URLs (may be https domains) the proxy is reachable through.
+   * Display only: shown on the settings card and the login page.
+   */
+  accessUrls?: string[]
   /** Failed login attempts before an IP is locked out (0 disables lockout). */
   maxFailures?: number
   /** Lockout duration in minutes after maxFailures. */
@@ -83,12 +88,17 @@ export const Config: z<Config> = z.object({
   token: z.string().role('secret').default(''),
   banner: z.string().default(''),
   allowedIps: z.array(z.string()).default([]),
+  accessUrls: z.array(z.string()).default([]),
   maxFailures: z.natural().default(0),
   lockoutMinutes: z.natural().min(1).default(15),
 })
 
 /** Fully-resolved config shape (every field materialized). */
-type Resolved = Required<Omit<Config, 'banner' | 'allowedIps'>> & { banner: string; allowedIps: string[] }
+type Resolved = Required<Omit<Config, 'banner' | 'allowedIps' | 'accessUrls'>> & {
+  banner: string
+  allowedIps: string[]
+  accessUrls: string[]
+}
 
 const COOKIE_NAME = 'dsh_auth_session'
 
@@ -99,6 +109,18 @@ const TOKEN_PLACEHOLDER = 'change-me'
 function tokenConfigured(token: string): boolean {
   const trimmed = token.trim()
   return trimmed !== '' && trimmed !== TOKEN_PLACEHOLDER
+}
+
+/** Non-internal IPv4 addresses, for logging reachable URLs when binding 0.0.0.0. */
+function localAddresses(): string[] {
+  const out: string[] = []
+  for (const list of Object.values(networkInterfaces())) {
+    if (!list) continue
+    for (const info of list) {
+      if (info.family === 'IPv4' && !info.internal) out.push(info.address)
+    }
+  }
+  return out.sort()
 }
 
 /** User-editable config document (~/.dsh/dsh-auth-proxy.json). */
@@ -266,7 +288,12 @@ const UUID_POLYFILL = `<script>
 })();
 <\/script>`
 
-const LOGIN_PAGE = (banner: string, locked = false): string => `<!doctype html>
+/** Escape user-supplied text before interpolating it into the login page HTML. */
+function htmlEscape(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+const LOGIN_PAGE = (banner: string, locked = false, accessUrls: string[] = []): string => `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -298,19 +325,25 @@ const LOGIN_PAGE = (banner: string, locked = false): string => `<!doctype html>
   button:hover { background: #38bdf8; }
   .err { color: #f87171; font-size: 13px; margin-top: 12px; min-height: 18px; }
   .locked { color: #fbbf24; font-size: 13px; margin-top: 12px; min-height: 18px; }
+  .urls { margin-top: 20px; padding-top: 14px; border-top: 1px solid #334155; font-size: 12px; color: #94a3b8; line-height: 1.8; }
+  .urls a { color: #7dd3fc; text-decoration: none; }
+  .urls a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
 <div class="card">
   <h1>DSH Web 访问鉴权</h1>
   <div class="sub">请输入访问令牌以继续</div>
-  ${banner ? `<div class="banner">${banner}</div>` : ''}
+  ${banner ? `<div class="banner">${htmlEscape(banner)}</div>` : ''}
   ${locked ? '<div class="locked">尝试次数过多，已临时锁定，请稍后再试</div>' : `
   <form method="post" action="/__dsh_auth/login">
     <input type="password" name="token" placeholder="访问令牌" autofocus autocomplete="current-password">
     <button type="submit">进入</button>
   </form>
   <div class="err"></div>`}
+  ${accessUrls.length > 0
+    ? `<div class="urls">访问地址：${accessUrls.map((u) => `<a href="${htmlEscape(u)}">${htmlEscape(u)}</a>`).join('、')}</div>`
+    : ''}
 </div>
 </body>
 </html>`
@@ -344,6 +377,7 @@ const DEFAULTS: Resolved = {
   token: '',
   banner: '',
   allowedIps: [],
+  accessUrls: [],
   maxFailures: 0,
   lockoutMinutes: 15,
 }
@@ -378,6 +412,7 @@ export function apply(ctx: Context, config?: Config): void {
       token: value.token ?? DEFAULTS.token,
       banner: value.banner ?? DEFAULTS.banner,
       allowedIps: value.allowedIps ?? DEFAULTS.allowedIps,
+      accessUrls: value.accessUrls ?? DEFAULTS.accessUrls,
       maxFailures: value.maxFailures ?? DEFAULTS.maxFailures,
       lockoutMinutes: value.lockoutMinutes ?? DEFAULTS.lockoutMinutes,
     }
@@ -387,6 +422,8 @@ export function apply(ctx: Context, config?: Config): void {
   let live: Resolved = resolve()
   /** Whether the disabled state was already announced (avoid log spam). */
   let announcedDisabled = false
+  /** Whether the listen socket is currently up (reported by the config API). */
+  let serverUp = false
 
   const loginPath = '/__dsh_auth/login'
   const logoutPath = '/__dsh_auth/logout'
@@ -408,6 +445,7 @@ export function apply(ctx: Context, config?: Config): void {
     const srv = server
     if (srv === undefined) return
     server = undefined
+    serverUp = false
     if (disposeServer !== undefined) {
       // The old effect's disposer calls teardownServer(false), which no-ops
       // now that `server` is undefined — releasing it keeps the fiber clean.
@@ -436,7 +474,7 @@ export function apply(ctx: Context, config?: Config): void {
     const stateChanged = wasListening !== shouldListen
     live = next
 
-    // Hot update: non-socket config (token, banner, allowlist, lockout)
+    // Hot update: non-socket config (token, banner, accessUrls, allowlist, lockout)
     // takes effect on the next request via `live` — no rebuild, no dropped
     // connections, no dead WebSockets.
     if (!bindChanged && !stateChanged) {
@@ -572,7 +610,7 @@ export function apply(ctx: Context, config?: Config): void {
       if (isLockedOut(ip)) {
         if (pathname === loginPath) {
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-          res.end(LOGIN_PAGE(c.banner, true))
+          res.end(LOGIN_PAGE(c.banner, true, c.accessUrls))
         } else {
           res.writeHead(403, { 'content-type': 'text/plain' })
           res.end('locked out')
@@ -592,12 +630,12 @@ export function apply(ctx: Context, config?: Config): void {
           } else {
             recordFailure(ip, c.maxFailures, c.lockoutMinutes)
             res.writeHead(401, { 'content-type': 'text/html; charset=utf-8' })
-            res.end(LOGIN_PAGE(c.banner).replace('<div class="err"></div>', '<div class="err">令牌错误，请重试</div>'))
+            res.end(LOGIN_PAGE(c.banner, false, c.accessUrls).replace('<div class="err"></div>', '<div class="err">令牌错误，请重试</div>'))
           }
           return
         }
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-        res.end(LOGIN_PAGE(c.banner))
+        res.end(LOGIN_PAGE(c.banner, false, c.accessUrls))
         return
       }
 
@@ -648,9 +686,17 @@ export function apply(ctx: Context, config?: Config): void {
     })
 
     srv.listen(next.port, next.host, () => {
+      serverUp = true
       ctx.logger.info(
         `dsh-auth-proxy: listening on ${next.host}:${next.port} -> http://${next.targetHost}:${next.targetPort}`,
       )
+      // 0.0.0.0 is not a clickable address: log the reachable LAN URLs too.
+      const reachable = (next.host === '0.0.0.0' || next.host === '::')
+        ? localAddresses().map((ip) => `http://${ip}:${next.port}`)
+        : [`http://${next.host}:${next.port}`]
+      if (reachable.length > 0) {
+        ctx.logger.info(`dsh-auth-proxy: reachable at ${reachable.join(', ')}`)
+      }
     })
 
     server = srv
@@ -739,8 +785,10 @@ export function apply(ctx: Context, config?: Config): void {
             targetPort: effective.targetPort,
             banner: effective.banner,
             allowedIps: effective.allowedIps,
+            accessUrls: effective.accessUrls,
             maxFailures: effective.maxFailures,
             lockoutMinutes: effective.lockoutMinutes,
+            listening: serverUp,
             tokenSet: tokenConfigured(effective.token),
           })
           return
@@ -769,6 +817,7 @@ export function apply(ctx: Context, config?: Config): void {
               token: merged.token ?? resolve().token ?? DEFAULTS.token,
               banner: merged.banner ?? DEFAULTS.banner,
               allowedIps: merged.allowedIps ?? DEFAULTS.allowedIps,
+              accessUrls: merged.accessUrls ?? DEFAULTS.accessUrls,
               maxFailures: merged.maxFailures ?? DEFAULTS.maxFailures,
               lockoutMinutes: merged.lockoutMinutes ?? DEFAULTS.lockoutMinutes,
             }

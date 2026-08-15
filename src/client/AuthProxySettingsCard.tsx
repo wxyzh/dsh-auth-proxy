@@ -1,8 +1,9 @@
 /**
  * The auth-proxy settings card. Fetches the plugin's own config endpoint
  * (GET /api/dsh-auth-proxy/config), stages edits locally, and PUTs the whole
- * document on save. Uses inline styles — the card must not depend on a
- * sibling UI package's CSS pipeline.
+ * document on save. Uses inline styles bound to the dsh `--dsw-alias-*` design
+ * tokens so the card follows the active skin/theme (light and dark) — the
+ * card must not depend on a sibling UI package's CSS pipeline.
  */
 
 import { useEffect, useState } from 'react'
@@ -17,8 +18,10 @@ interface ConfigView {
   targetPort: number
   banner: string
   allowedIps: string[]
+  accessUrls: string[]
   maxFailures: number
   lockoutMinutes: number
+  listening: boolean
   tokenSet: boolean
 }
 
@@ -33,10 +36,10 @@ export interface AuthProxySettingsCardProps {
 const styles = {
   card: {
     listStyle: 'none',
-    border: '1px solid #2b3a4a',
+    border: '1px solid var(--dsw-alias-border-l2)',
     borderRadius: '10px',
     margin: '4px 0',
-    background: '#16202b',
+    background: 'var(--dsw-alias-bg-layer-3)',
     overflow: 'hidden',
   } as const,
   header: {
@@ -45,29 +48,29 @@ const styles = {
     width: '100%',
     background: 'transparent',
     border: '0',
-    color: '#e2e8f0',
+    color: 'var(--dsw-alias-label-primary)',
     padding: '12px 16px',
     cursor: 'pointer',
     fontSize: '14px',
     textAlign: 'left' as const,
   },
   name: { fontWeight: 600, marginRight: '12px' },
-  description: { color: '#7c8ba1', fontSize: '12px', flex: 1 },
-  chevron: { color: '#7c8ba1', marginLeft: '8px' },
-  body: { padding: '4px 16px 16px', borderTop: '1px solid #243244' },
+  description: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', flex: 1 },
+  chevron: { color: 'var(--dsw-alias-label-tertiary)', marginLeft: '8px' },
+  body: { padding: '4px 16px 16px', borderTop: '1px solid var(--dsw-alias-border-l2)' },
   field: { margin: '12px 0' },
-  label: { display: 'block', fontSize: '12px', color: '#94a3b8', marginBottom: '4px' },
+  label: { display: 'block', fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '4px' },
   input: {
     width: '100%',
     padding: '8px 10px',
     borderRadius: '6px',
-    border: '1px solid #2b3a4a',
-    background: '#0f1720',
-    color: '#e2e8f0',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-specific-input-major)',
+    color: 'var(--dsw-alias-label-primary)',
     fontSize: '13px',
     boxSizing: 'border-box' as const,
   },
-  hint: { fontSize: '11px', color: '#5b6b80', margin: '4px 0 0' },
+  hint: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', margin: '4px 0 0' },
   footer: { display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '16px' },
   button: {
     padding: '6px 14px',
@@ -76,23 +79,43 @@ const styles = {
     fontSize: '13px',
     cursor: 'pointer',
   },
-  save: { background: '#0ea5e9', color: '#082f49', fontWeight: 600 },
-  discard: { background: '#243244', color: '#94a3b8' },
-  status: { fontSize: '12px', color: '#7dd3fc', marginTop: '8px' },
-  error: { fontSize: '12px', color: '#f87171', marginTop: '8px' },
+  save: {
+    background: 'var(--dsw-alias-button-info-fill)',
+    color: 'var(--dsw-alias-label-primary-foreground)',
+    fontWeight: 600,
+  },
+  discard: {
+    background: 'transparent',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    color: 'var(--dsw-alias-label-secondary)',
+  },
+  status: { fontSize: '12px', marginTop: '8px' },
+  statusOk: { color: 'var(--dsw-alias-state-success-primary)' },
+  statusWarn: { color: 'var(--dsw-alias-state-warn-primary)' },
+  error: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)', marginTop: '8px' },
   warning: {
     fontSize: '12px',
-    color: '#fbbf24',
-    background: 'rgba(251, 191, 36, 0.08)',
-    border: '1px solid rgba(251, 191, 36, 0.35)',
+    color: 'var(--dsw-alias-state-warn-primary)',
+    border: '1px solid var(--dsw-alias-state-warn-primary)',
     borderRadius: '6px',
     padding: '8px 10px',
     margin: '12px 0',
   },
+  accessUrls: {
+    fontSize: '12px',
+    color: 'var(--dsw-alias-label-secondary)',
+    marginTop: '8px',
+    lineHeight: 1.7,
+  },
+  accessLink: {
+    color: 'var(--dsw-alias-state-business-primary)',
+    textDecoration: 'none',
+    marginRight: '6px',
+  },
   row: { display: 'flex', gap: '12px' },
   half: { flex: 1 },
   checkbox: { display: 'flex', alignItems: 'center', gap: '8px', margin: '12px 0' },
-  check: { width: '16px', height: '16px', accentColor: '#0ea5e9' },
+  check: { width: '16px', height: '16px', accentColor: 'var(--dsw-alias-button-info-fill)' },
 }
 
 /** One staged text field. */
@@ -146,6 +169,7 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
   const [targetPort, setTargetPort] = useState('3080')
   const [banner, setBanner] = useState('')
   const [allowedIps, setAllowedIps] = useState('')
+  const [accessUrls, setAccessUrls] = useState('')
   const [maxFailures, setMaxFailures] = useState('0')
   const [lockoutMinutes, setLockoutMinutes] = useState('15')
 
@@ -166,6 +190,7 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
         setTargetPort(String(view.targetPort))
         setBanner(view.banner)
         setAllowedIps((view.allowedIps ?? []).join(', '))
+        setAccessUrls((view.accessUrls ?? []).join(', '))
         setMaxFailures(String(view.maxFailures))
         setLockoutMinutes(String(view.lockoutMinutes))
         setLoading(false)
@@ -192,6 +217,7 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
       targetPort: Number(targetPort),
       banner,
       allowedIps: allowedIps.split(',').map((s) => s.trim()).filter((s) => s !== ''),
+      accessUrls: accessUrls.split(/[,，\s]+/).map((s) => s.trim()).filter((s) => s !== ''),
       maxFailures: Number(maxFailures),
       lockoutMinutes: Number(lockoutMinutes),
     }
@@ -225,6 +251,7 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
       setTargetPort(String(cfg.targetPort))
       setBanner(cfg.banner)
       setAllowedIps((cfg.allowedIps ?? []).join(', '))
+      setAccessUrls((cfg.accessUrls ?? []).join(', '))
       setMaxFailures(String(cfg.maxFailures))
       setLockoutMinutes(String(cfg.lockoutMinutes))
     }
@@ -256,6 +283,23 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
               ? (
                 <>
                   {!cfg.tokenSet ? <p style={ui.warning}>{t('warnings.noToken')}</p> : null}
+                  <p style={{ ...ui.status, ...(cfg.listening ? ui.statusOk : ui.statusWarn) }}>
+                    {cfg.listening
+                      ? `${t('status.listening')} http://${cfg.host}:${cfg.port}`
+                      : t('status.disabled')}
+                  </p>
+                  {cfg.accessUrls.length > 0
+                    ? (
+                      <p style={ui.accessUrls}>
+                        {t('status.accessUrls')}:{' '}
+                        {cfg.accessUrls.map((u, i) => (
+                          <a key={u} href={u} style={ui.accessLink}>
+                            {u}{i < cfg.accessUrls.length - 1 ? '、' : ''}
+                          </a>
+                        ))}
+                      </p>
+                    )
+                    : null}
                   <div style={ui.checkbox}>
                     <input
                       id="auth-proxy-enabled"
@@ -287,6 +331,12 @@ export function AuthProxySettingsCard(props: AuthProxySettingsCardProps) {
                     hint={t('fields.allowedIps')}
                   />
                   <Field label={t('fields.banner')} value={banner} onChange={(v) => { setBanner(v); mark() }} />
+                  <Field
+                    label={t('fields.accessUrls')}
+                    value={accessUrls}
+                    onChange={(v) => { setAccessUrls(v); mark() }}
+                    hint={t('fields.accessUrlsHint')}
+                  />
                   <div style={ui.row}>
                     <Field label={t('fields.maxFailures')} numeric value={maxFailures} onChange={(v) => { setMaxFailures(v); mark() }} width="half" />
                     <Field label={t('fields.lockoutMinutes')} numeric value={lockoutMinutes} onChange={(v) => { setLockoutMinutes(v); mark() }} width="half" />

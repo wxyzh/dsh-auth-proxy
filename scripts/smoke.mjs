@@ -229,16 +229,20 @@ const tick = () => new Promise((r) => setImmediate(r))
   const route = s.configRoute()
   ok(route !== undefined, 'config API route registered (via fake webServer)')
 
-  const res = await callApi(route, 'PUT', { banner: 'SMOKE-BANNER' })
+  const res = await callApi(route, 'PUT', { banner: 'SMOKE-BANNER', accessUrls: ['https://dsh.example.com', 'http://lan.local:8443'] })
   const parsed = JSON.parse(res.body)
   ok(res.status === 200 && parsed.ok === true, 'PUT banner -> 200 ok (response written before any rebuild)')
 
   const get = await callApi(route, 'GET', {})
   const view = JSON.parse(get.body)
   ok(view.banner === 'SMOKE-BANNER' && view.tokenSet === true, 'GET reflects new banner + tokenSet')
+  ok(view.listening === true, 'GET reports the proxy is listening')
+  ok(Array.isArray(view.accessUrls) && view.accessUrls.length === 2 && view.accessUrls[0] === 'https://dsh.example.com',
+    'GET reports the configured access URLs')
 
   const login = await httpGet(p, '/__dsh_auth/login')
   ok(login.body.includes('SMOKE-BANNER'), 'login page serves the new banner (same server, no rebuild)')
+  ok(login.body.includes('https://dsh.example.com'), 'login page lists the configured access URL')
   ok((await canConnect(p)) === true, 'proxy still listening on the same port')
   s.closeAll()
 }

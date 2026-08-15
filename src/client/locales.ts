@@ -21,9 +21,14 @@ export type AuthProxyKey =
   | 'fields.tokenHint'
   | 'fields.banner'
   | 'fields.allowedIps'
+  | 'fields.accessUrls'
+  | 'fields.accessUrlsHint'
   | 'fields.maxFailures'
   | 'fields.lockoutMinutes'
   | 'warnings.noToken'
+  | 'status.listening'
+  | 'status.disabled'
+  | 'status.accessUrls'
 
 export const zh: Record<AuthProxyKey, string> = {
   title: 'DSH 访问鉴权代理',
@@ -47,9 +52,14 @@ export const zh: Record<AuthProxyKey, string> = {
   'fields.tokenHint': '留空保持当前令牌不变',
   'fields.banner': '登录页横幅',
   'fields.allowedIps': 'IP 白名单（逗号分隔，支持 CIDR）',
+  'fields.accessUrls': '访问地址',
+  'fields.accessUrlsHint': '通过哪些域名或 URL 访问本代理（多个用逗号分隔），仅用于展示',
   'fields.maxFailures': '失败锁定阈值（0=关闭）',
   'fields.lockoutMinutes': '锁定时长（分钟）',
   'warnings.noToken': '未设置访问令牌（或仍为占位符 change-me），代理当前处于禁用状态',
+  'status.listening': '运行中，对外监听',
+  'status.disabled': '代理已禁用',
+  'status.accessUrls': '访问地址',
 }
 
 export const en: Record<AuthProxyKey, string> = {
@@ -74,7 +84,12 @@ export const en: Record<AuthProxyKey, string> = {
   'fields.tokenHint': 'Leave empty to keep the current token',
   'fields.banner': 'Login page banner',
   'fields.allowedIps': 'IP allowlist (comma-separated, CIDR supported)',
+  'fields.accessUrls': 'Access URLs',
+  'fields.accessUrlsHint': 'Domains or URLs this proxy is reached through (comma-separated, display only)',
   'fields.maxFailures': 'Lockout threshold (0=off)',
   'fields.lockoutMinutes': 'Lockout duration (minutes)',
   'warnings.noToken': 'No access token set (or still the placeholder change-me) — the proxy is currently disabled',
+  'status.listening': 'Running, listening on',
+  'status.disabled': 'Proxy disabled',
+  'status.accessUrls': 'Access URLs',
 }

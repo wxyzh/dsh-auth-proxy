@@ -27,5 +27,6 @@
         token: !!js process.env.DSH_AUTH_TOKEN ?? 'change-me'
         banner: ''
         allowedIps: []
+        accessUrls: []
         maxFailures: 0
         lockoutMinutes: 15

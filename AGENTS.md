@@ -32,7 +32,7 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `0.0.0.0:<port>` �
   `~/.dsh/dsh-auth-proxy.json`（文件层**权威**）。卡片 PUT 只写文件、只更新 `fileConfig`，**不得重指 `current`**；
   `installSettingsSection` 的 `setSource` 只换 `base` 层。文件层是唯一持久存储，重启生效。
 - **`sync()` 两态**：仅 `host`/`port`/监听状态变化才重建服务器（`teardownServer` 优雅关闭：
-  `close()` + 1.5s 兜底强关）；其余字段（token、banner、白名单、锁定）热更新，只换 `live` 快照。
+  `close()` + 1.5s 兜底强关）；其余字段（token、banner、accessUrls、白名单、锁定）热更新，只换 `live` 快照。
   PUT 处理器**先写响应再 `setImmediate(sync)`**，保证保存响应先于重建到达浏览器。
 - **请求处理器一律读 `live` 快照**（每请求 `const c = live`），禁止闭包捕获 `sync()` 时的 cfg 快照。
 

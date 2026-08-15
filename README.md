@@ -20,6 +20,8 @@ browser ──► auth proxy :8443 (0.0.0.0) ──► dsh webserver 127.0.0.1:3
 - IP 白名单（支持 CIDR，IPv4）可整体绕过令牌；失败登录锁定（按 IP，阈值与时长可配）。
 - 配置实时可改：Web UI「设置 > 插件配置」卡片（走插件自有 `/api/dsh-auth-proxy/config`），
   无需改文件；对纯 HTTP 局域网地址自动注入 `crypto.randomUUID` polyfill，保证前端 RPC 可用。
+- 状态可视：宿主日志与设置卡片显示实际监听地址（绑定 `0.0.0.0` 时列出可达的局域网 IP:端口）；
+  通过 `accessUrls` 声明的入口地址（可含 HTTPS 域名）会展示在卡片与登录页，多域名场景一眼可知该用哪个 URL。
 
 ## 安装与激活
 
@@ -44,6 +46,7 @@ dsh plugin --profile web add link:<abs 路径>/dsh-auth-proxy
 | `token` | 见下 | 共享访问令牌 |
 | `banner` | `''` | 登录页横幅文案 |
 | `allowedIps` | `[]` | IP 白名单（如 `["127.0.0.1", "10.0.0.0/8"]`），空 = 一律要令牌 |
+| `accessUrls` | `[]` | 对外访问地址（可含 HTTPS 域名，多域名逗号分隔），仅用于展示 |
 | `maxFailures` | `0` | 失败锁定阈值（0 = 关闭锁定） |
 | `lockoutMinutes` | `15` | 锁定时长（分钟） |
 
@@ -78,4 +81,4 @@ token: !!js process.env.DSH_AUTH_TOKEN
 
 - 会话永久有效：条目随登录数线性增长（重启清零，属预期）；失败计数表由定时清理兜底。
 - `ws` 依赖当前未被引用（清理项）。
-- 当前目录尚未初始化 git 仓库。
+- 当前目录已是 git 仓库（初始提交已建）。
