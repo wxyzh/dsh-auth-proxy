@@ -10,7 +10,7 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`�
   （`dsh plugin --profile web add link:<abs path>/dsh-auth-proxy`）。
 - **基于官方 NPM SDK 开发**：类型与运行面来自 `@deepseek-ai/*` peer/devDependencies（node_modules 解析）；
   禁止 tsconfig `extends` / `paths` / `references` 指向任何 DSH 源码 checkout。
-- **命名**：包名沿用 `dsh-` 前缀（`@ken/dsh-auth-proxy`，私有 scope，非官方 `@deepseek-ai`）；
+- **命名**：包名沿用 `dsh-` 前缀（`@wxyzh/dsh-auth-proxy`，私有 scope，非官方 `@deepseek-ai`）；
   发布到 npm 前需维护者确认版本号与 scope，避免误发。
 - **禁止 emoji**：代码、注释、文档、UI 文案、提交信息均不得出现 emoji 字符；需要装饰符号时用普通字符
   （如 `-`、`*`）或去掉。

@@ -22,7 +22,7 @@
 # the proxy stays DISABLED — it never listens with a well-known token.
 - insert:
     - id: auth-proxy
-      name: '@ken/dsh-auth-proxy'
+      name: '@wxyzh/dsh-auth-proxy'
       config:
         enabled: true
         host: '127.0.0.1'

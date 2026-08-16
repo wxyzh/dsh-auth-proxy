@@ -37,7 +37,7 @@ export default defineConfig({
   noExternal: (id: string) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
   outputOptions: {
     entryFileNames: 'client.js',
-    banner: `window.__ModuleLoader__.load({ id: "@ken/dsh-auth-proxy", factory: (require) => {`,
+    banner: `window.__ModuleLoader__.load({ id: "@wxyzh/dsh-auth-proxy", factory: (require) => {`,
     footer: 'return module.exports; } });',
     intro: 'var module = { exports: {} }; var exports = module.exports;',
   },
