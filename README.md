@@ -32,31 +32,35 @@ browser ──► auth proxy :8443 (127.0.0.1) ──► dsh webserver 127.0.0.1
 - **无 TLS，禁绑通配/公网**：监听地址仅允许回环与内网（默认 `127.0.0.1`）；`0.0.0.0`、`::` 与公网 IP
   在保存与启动时都会被拒绝。外部访问请在前面挂 TLS 反向代理，回指本监听地址。
 
-## 安装与激活
+## 安装与卸载
 
-安装发布版（npm 与 GitHub 二选一）：
+`dsh plugin` 把参数转发给 pnpm，在 profile 目录安装依赖，并按 `dsh.bundle` 声明自动把插件
+挂进 web profile roster（即 `cordis.patch.yml` 的 `auth-proxy` 行），无需额外激活步骤。
+
+安装（npm 发布版与 GitHub 直装二选一）：
 
 ```sh
 # npm 发布版
-npm install @wxyzh/dsh-auth-proxy
+dsh plugin --profile web add @wxyzh/dsh-auth-proxy
 
 # 或 GitHub 直装（固定 tag 版本）
-npm install github:wxyzh/dsh-auth-proxy#v0.1.0
+dsh plugin --profile web add github:wxyzh/dsh-auth-proxy#v0.1.0
 ```
 
-然后在 dsh 中按包名激活：
-
-```sh
-dsh plugin --profile web add @wxyzh/dsh-auth-proxy
-```
-
-本地开发用 link 方式（无需发布、直接挂源码目录）：
+本地开发用 link 方式（无需发布，直接挂源码目录）：
 
 ```sh
 dsh plugin --profile web add link:<abs 路径>/dsh-auth-proxy
 ```
 
-激活声明见 `cordis.patch.yml`（web profile roster 插入 `auth-proxy` 行）。本插件是宿主 +
+卸载（无论以哪种方式安装，都用包名）：
+
+```sh
+dsh plugin --profile web remove @wxyzh/dsh-auth-proxy
+```
+
+说明：`dsh plugin` 需要 pnpm 在 PATH 上；GitHub 直装时若 pnpm 拦截 `prepare` 构建脚本，
+按 CLI 提示在 profile 的 `pnpm-workspace.yaml` 添加 `allowBuilds` 键后重试。本插件是宿主 +
 浏览器双半插件：宿主侧 `src/index.ts`，浏览器侧 `src/client/`（设置卡片）。
 
 ## 配置
