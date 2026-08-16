@@ -34,6 +34,24 @@ browser ──► auth proxy :8443 (127.0.0.1) ──► dsh webserver 127.0.0.1
 
 ## 安装与激活
 
+安装发布版（npm 与 GitHub 二选一）：
+
+```sh
+# npm 发布版
+npm install @wxyzh/dsh-auth-proxy
+
+# 或 GitHub 直装（固定 tag 版本）
+npm install github:wxyzh/dsh-auth-proxy#v0.1.0
+```
+
+然后在 dsh 中按包名激活：
+
+```sh
+dsh plugin --profile web add @wxyzh/dsh-auth-proxy
+```
+
+本地开发用 link 方式（无需发布、直接挂源码目录）：
+
 ```sh
 dsh plugin --profile web add link:<abs 路径>/dsh-auth-proxy
 ```
