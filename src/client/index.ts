@@ -36,7 +36,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
   interface SlotMap {
     /** The plugin-configuration section's card seat (declared by ui-settings-plugins). */
-    'settings.plugin.item': { kind: 'list'; scope: 'root'; owner: Record<string, never> }
+    'settings.plugin.item': { kind: 'keyed'; scope: 'root'; owner: Record<string, never> }
   }
 }
 
@@ -58,7 +58,9 @@ export function apply(ctx: ClientContext): void {
     register: (...args: unknown[]) => unknown
   }
   slots.inject('settings.plugin.item', () => slots.register(
-    { name: 'settings.plugin.item', id: 'auth-proxy', order: 100, locale: NS },
+    // Keyed by the settings namespace the card edits — the configurable-plugins
+    // tab dispatches `settings.plugin.item` per registered namespace on the Host.
+    { name: 'settings.plugin.item', key: 'dsh-auth-proxy', locale: NS },
     AuthProxySettingsCard as unknown as ClientSlotComponent,
   ))
 }
