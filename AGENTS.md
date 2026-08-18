@@ -60,8 +60,10 @@ auth-proxy 配置分区（`settings.section`，与 Models/General 同级，非�
   跨插件协作走 cordis 服务（`ctx.slots` / `ctx.locale`）。
 - 文案 zh/en 双语：key 注册在 `src/client/locales.ts` 的 `AuthProxyKey` 联合类型，**新增 key 必须两语齐全**。
 - 浏览器配置页经 `ctx.settingsScope` 读写 `dsh-auth-proxy` 命名空间，注册成一个 `settings.section` 独立设置分区
-  （`id: 'dsh-auth-proxy'`，带本地化的导航 `label`，随 `locale/change` 重注册刷新文案）；不使用 `settings.plugin.item`
-  折叠卡片。仅 `GET /api/dsh-auth-proxy/status` 作只读运行态探测（listening / tokenSet / accessUrls），不做任何写。
+  （`id: 'dsh-auth-proxy'`，经 `ctx.slots.inject('settings.section', …)` 延迟到声明落地后再注册；导航 `label` 用
+  **thunk**（`() => t('title')`），命名空间的 nav 缓存按 locale revision 重算并逐次重读 thunk，故无需 `locale/change`
+  重注册）；不使用 `settings.plugin.item` 折叠卡片。仅 `GET /api/dsh-auth-proxy/status` 作只读运行态探测
+  （listening / tokenSet / accessUrls），不做任何写。
 
 ## 已知边界（勿当 bug 误修）
 
