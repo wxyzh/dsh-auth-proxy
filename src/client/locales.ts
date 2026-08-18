@@ -31,7 +31,7 @@ export type AuthProxyKey =
   | 'status.accessUrls'
 
 export const zh: Record<AuthProxyKey, string> = {
-  title: 'DSH 访问鉴权代理',
+  title: '访问鉴权代理',
   description: '网络端口、令牌、IP 白名单与失败锁定策略',
   'settings.save': '保存',
   'settings.saving': '保存中…',
@@ -63,7 +63,7 @@ export const zh: Record<AuthProxyKey, string> = {
 }
 
 export const en: Record<AuthProxyKey, string> = {
-  title: 'DSH Auth Proxy',
+  title: 'Auth Proxy',
   description: 'Listen port, token, IP allowlist and lockout policy',
   'settings.save': 'Save',
   'settings.saving': 'Saving…',
