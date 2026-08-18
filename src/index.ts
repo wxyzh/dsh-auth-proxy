@@ -30,17 +30,15 @@
  * with a timing-safe hash; an empty token — or the placeholder `change-me`
  * from the bundle patch — disables the proxy entirely, never a listening
  * port with a well-known secret. Config is edited live from the Web UI via
- * the plugin's own settings card (Settings > Plugin config), persisted to
- * ~/.dsh/dsh-auth-proxy.json. The file layer always wins over the
- * composition entry (which feeds the dsh-settings scope as its base layer),
- * so changes saved from the card survive restarts.
+ * the plugin's own settings card (Settings > Plugin config), which writes
+ * through the official dsh-settings scope. The namespace is registered by
+ * installSettingsSection, whose registered scope resolves schema defaults, the
+ * composition entry (base), and the user document section (the deployment's
+ * dsh-settings-file provider persists it) — there is no bespoke config file.
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve as resolvePath } from 'node:path'
-import { homedir } from 'node:os'
 import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -51,7 +49,12 @@ import { clearInterval, clearTimeout, setInterval, setTimeout } from 'node:timer
 /** Stable cordis plugin name. */
 export const name = 'auth-proxy'
 
-/** No host services are required — this plugin stands alone on its own socket. */
+/**
+ * No host services are required — this plugin stands alone on its own socket.
+ * The dsh-settings scope is optional (installSettingsSection self-detects a
+ * provider and falls back to the composition entry), so `settings` is not a hard
+ * inject.
+ */
 export const inject: string[] = []
 
 /**
@@ -148,32 +151,6 @@ function listenHostIssue(host: string): string | null {
     || (a === 169 && b === 254)
   if (!privateOrLocal) return '禁止监听公网 IP（无 TLS，令牌会明文暴露）；仅允许回环与内网地址'
   return null
-}
-
-/** User-editable config document (~/.dsh/dsh-auth-proxy.json). */
-function configFilePath(): string {
-  const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-  return join(dshHome, 'dsh-auth-proxy.json')
-}
-
-/** Load the user config file, or null when absent/invalid. */
-function loadConfigFile(): Partial<Config> | null {
-  try {
-    const raw = readFileSync(configFilePath(), 'utf8')
-    const parsed: unknown = JSON.parse(raw)
-    return typeof parsed === 'object' && parsed !== null ? parsed as Partial<Config> : null
-  } catch {
-    return null
-  }
-}
-
-/** Persist the user config file (tmp + atomic rename: a crash never leaves a half-written document). */
-function saveConfigFile(value: Partial<Config>): void {
-  const file = configFilePath()
-  mkdirSync(dirname(file), { recursive: true })
-  const tmp = `${file}.tmp`
-  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8')
-  renameSync(tmp, file)
 }
 
 /** In-memory failed-login counter per IP: ip -> { count, lockUntil?, lastFailAt }. */
@@ -482,25 +459,22 @@ const DEFAULTS: Resolved = {
 
 /**
  * Mount the auth proxy. Configuration resolves as: dsh-settings scope (or the
- * composition entry when no settings service is present) as the base layer,
- * with the user config file (~/.dsh/dsh-auth-proxy.json) on top — the file is
- * what the settings card edits, so its changes survive restarts.
+ * composition entry when no settings service is present) is the single
+ * resolution — the settings scope layers schema defaults, the composition
+ * entry (base), and the user-document section persisted by the deployment's
+ * settings provider.
  * @param ctx - host plugin context.
  * @param config - resolved plugin config.
  */
 export function apply(ctx: Context, config?: Config): void {
-  /** The user config file overrides everything else (highest precedence). */
-  let fileConfig: Partial<Config> = loadConfigFile() ?? {}
   /**
-   * Base layer of the config resolution: the dsh-settings scope while one is
-   * attached (installSettingsSection re-points this), otherwise the
-   * composition entry. The user config file always wins over it.
+   * The config source: the dsh-settings scope while one is attached
+   * (installSettingsSection re-points this), otherwise the composition entry.
    */
   let base: () => Config = () => (config ?? {}) as Config
-  /** Single resolution: base layer, then the user config file on top. */
-  let current: () => Config = () => ({ ...base(), ...fileConfig }) as Config
-  const resolve = (): Resolved => {
-    const value = current()
+  /** Single resolution: the current base source. */
+  const resolve: () => Resolved = () => {
+    const value = base()
     return {
       enabled: value.enabled ?? DEFAULTS.enabled,
       host: value.host ?? DEFAULTS.host,
@@ -859,116 +833,54 @@ export function apply(ctx: Context, config?: Config): void {
     proxy.end(head)
   }
 
-  // The dsh-settings scope (when present) is the BASE layer of the config
-  // resolution; the user config file always wins over it. Kept registered so
-  // host-driven settings surfaces still see this namespace, while the file —
-  // the only store the settings card writes — is what actually survives
-  // restarts.
+  // The dsh-settings scope (when present) is the single config source: the
+  // settings provider persists a per-namespace user document, the composition
+  // entry is the `base` layer, and the registered scope resolves the three.
+  // installSettingsSection keeps the plugin working when no settings service is
+  // composed (falls back to the composition entry).
+  //
+  // The `validate` hook is the write gate that _rejects_ a stored section the
+  // plugin could not act on — the guard rails no schema can express. This is
+  // where the listen-host policy and the token-placeholder refusal live, exactly as
+  // the settings Service Definition intends: the Host is the only authority on
+  // whether a write landed.
   installSettingsSection(ctx, AUTH_SETTINGS_NAMESPACE, Config, config ?? ({} as Config), {
     setSource: (source) => {
       base = source
       sync()
     },
     onChange: sync,
+    validate: (value) => {
+      const v = { ...DEFAULTS, ...(value as Partial<Config>) }
+      // A placeholder/empty token is a LEGAL stored value — the proxy simply stays
+      // disabled — so only the listen-host policy is a hard rejection (no TLS).
+      const hostIssue = listenHostIssue(v.host ?? DEFAULTS.host)
+      if (hostIssue) throw new Error(hostIssue)
+    },
   })
 
-  // ── self-served config API (bypasses the dsh-settings exposed whitelist) ──
-  // The user config document is the editable layer; the API is only reachable
-  // through the harness webserver, so it inherits the /api browser-trust
-  // fence (loopback or --trusted-host) plus our own auth-proxy session gate
-  // when the browser enters through :8443.
-  const writeJson = (res: ServerResponse, status: number, body: unknown): void => {
-    const text = JSON.stringify(body)
-    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(text)
-  }
-  const apiRoutes: Array<{ kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => Promise<void> }> = [
-    {
-      kind: 'exact',
-      path: '/api/dsh-auth-proxy/config',
-      handler: async (req, res) => {
-        const method = req.method ?? 'GET'
-        if (method === 'GET') {
-          // Return the effective config minus the secret token value.
-          const effective = resolve()
-          writeJson(res, 200, {
-            enabled: effective.enabled,
-            host: effective.host,
-            port: effective.port,
-            targetHost: effective.targetHost,
-            targetPort: effective.targetPort,
-            banner: effective.banner,
-            allowedIps: effective.allowedIps,
-            accessUrls: effective.accessUrls,
-            maxFailures: effective.maxFailures,
-            lockoutMinutes: effective.lockoutMinutes,
-            listening: serverUp,
-            tokenSet: tokenConfigured(effective.token),
-          })
-          return
-        }
-        if (method === 'PUT') {
-          let raw = ''
-          for await (const chunk of req) raw += chunk
-          let next: Partial<Config>
-          try {
-            next = JSON.parse(raw) as Partial<Config>
-          } catch {
-            writeJson(res, 400, { error: 'invalid JSON body' })
-            return
-          }
-          // Validate the merged shape before persisting. The token may come
-          // from the composition env (never persisted to the user file), so
-          // probe with the effective default when absent.
-          const merged = { ...fileConfig, ...next }
-          try {
-            const probe = {
-              enabled: merged.enabled ?? DEFAULTS.enabled,
-              host: merged.host ?? DEFAULTS.host,
-              port: merged.port ?? DEFAULTS.port,
-              targetHost: merged.targetHost ?? DEFAULTS.targetHost,
-              targetPort: merged.targetPort ?? DEFAULTS.targetPort,
-              token: merged.token ?? resolve().token ?? DEFAULTS.token,
-              banner: merged.banner ?? DEFAULTS.banner,
-              allowedIps: merged.allowedIps ?? DEFAULTS.allowedIps,
-              accessUrls: merged.accessUrls ?? DEFAULTS.accessUrls,
-              maxFailures: merged.maxFailures ?? DEFAULTS.maxFailures,
-              lockoutMinutes: merged.lockoutMinutes ?? DEFAULTS.lockoutMinutes,
-            }
-            Config(probe)
-          } catch (err) {
-            writeJson(res, 400, { error: `invalid config: ${String(err)}` })
-            return
-          }
-          // No TLS: a wildcard or public listen host is refused outright.
-          const hostIssue = listenHostIssue(merged.host ?? DEFAULTS.host)
-          if (hostIssue) {
-            writeJson(res, 400, { error: 'invalid-config', detail: hostIssue })
-            return
-          }
-          fileConfig = merged
-          saveConfigFile(merged)
-          // `current` is always base() + fileConfig — no re-pointing needed.
-          const effective = resolve()
-          writeJson(res, 200, {
-            ok: true,
-            port: effective.port,
-            tokenSet: tokenConfigured(effective.token),
-          })
-          // Defer the rebuild: the response above must reach the browser before
-          // the listen socket is recreated (relevant only when host/port/enabled
-          // changed; other changes are hot-applied without a rebuild at all).
-          setImmediate(sync)
-          return
-        }
-        writeJson(res, 405, { error: `method not allowed: ${method}` })
-      },
+  // ── read-only runtime status (the write path is the dsh-settings scope) ──
+  // Serves only introspection facts the settings section does not carry — whether
+  // the socket is up and whether a real token is configured (the token value, a
+  // schema secret, never rides a response). Mutations flow exclusively through the
+  // settings scope above.
+  const statusRoute = {
+    kind: 'exact' as const,
+    path: '/api/dsh-auth-proxy/status',
+    handler: async (_req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      const effective = resolve()
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({
+        enabled: effective.enabled,
+        port: effective.port,
+        listening: serverUp,
+        tokenSet: tokenConfigured(effective.token),
+        accessUrls: effective.accessUrls,
+      }))
     },
-  ]
+  }
   ctx.inject(['webServer'], (wctx) => {
-    for (const route of apiRoutes) {
-      wctx.effect(() => wctx.webServer.register(route), 'dsh-auth-proxy: config api')
-    }
+    wctx.effect(() => wctx.webServer.register(statusRoute), 'dsh-auth-proxy: status api')
   })
 
   // Periodic sweep bounds the in-memory failure table. Sessions are

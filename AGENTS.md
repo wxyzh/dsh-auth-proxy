@@ -26,21 +26,23 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`�
   转发（`forward` / `doUpgrade`）前剥离 `x-forwarded-for`、`x-real-ip`。
 - **令牌**：`tokenConfigured()` 判定空串或占位符 `change-me` 为未配置，此时 `sync()` 禁用代理、绝不监听；
   登录比对必须走 `safeEqual()`（SHA-256 + `timingSafeEqual`）；schema 中 token 带 `role('secret')`，
-  `GET /api/dsh-auth-proxy/config` 永不回传令牌值，只回 `tokenSet` 布尔。
+  只读 `GET /api/dsh-auth-proxy/status` 永不回传令牌值，只回 `tokenSet` 布尔。
 - **会话**：cookie `HttpOnly; SameSite=Lax; Path=/`，**永久有效**（Max-Age 10 年）且**无状态**：
   值为 `payload.signature`（HMAC-SHA256，密钥由令牌 `hash(token)` 派生，见 `src/index.ts` 的 `issueSession`/`isValidSession`），
   服务端不存会话表，**重启后 cookie 仍有效**；**更换令牌 = 全体下线**（密钥变化令全部旧签名失效），登出仅清客户端 cookie；
   失败计数由定时清理兜底（30 分钟扫描，闲置超 1 小时清除）。
-- **配置分层（勿改回）**：解析 = `base` 层（dsh-settings scope，无 settings 服务时退化为组合入口）+ 用户文件
-  `~/.dsh/dsh-auth-proxy.json`（文件层**权威**）。卡片 PUT 只写文件、只更新 `fileConfig`，**不得重指 `current`**；
-  `installSettingsSection` 的 `setSource` 只换 `base` 层。文件层是唯一持久存储，重启生效。
+- **配置写入（与官方一致）**：dsh-settings scope 是**唯一写入路径**——Host 用 `installSettingsSection` 注册
+  `dsh-auth-proxy` 命名空间（`base` = 组合入口，用户文档层由部署的 settings provider（如 `dsh-settings-file`）持久化，
+  无 settings 服务时退化为组合入口）；浏览器卡片经 `ctx.settingsScope` 读写（revision 栅栏，Host `validate` 把关）。
+  **不存在自建的卡片配置文件**（旧的 `~/.dsh/dsh-auth-proxy.json` 权威已废弃）。监听 host 策略在
+  `installSettingsSection` 的 `validate` 钩子拒绝；令牌占位符是合法存储值，代理保持禁用。
 - **监听地址（勿放开）**：无 TLS，`listenHostIssue()`（`src/index.ts`）只允许回环与内网地址
   （`127/8`、`10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`::1`，`localhost`），
   **拒绝 `0.0.0.0`、`::` 与公网 IP**——默认 `127.0.0.1`，外部访问须用 TLS 反向代理回指监听地址。
-  PUT 与 `sync()` 双重拒绝，禁止放宽。
+  settings `validate` 钩子与 `sync()` 双重拒绝，禁止放宽。
 - **`sync()` 两态**：仅 `host`/`port`/监听状态变化才重建服务器（`teardownServer` 优雅关闭：
   `close()` + 1.5s 兜底强关）；其余字段（token、banner、accessUrls、白名单、锁定）热更新，只换 `live` 快照。
-  PUT 处理器**先写响应再 `setImmediate(sync)`**，保证保存响应先于重建到达浏览器。
+  写路径走 dsh-settings scope，重建由 settings 的 `onChange`/watcher 驱动（非自建 HTTP PUT）。
 - **终端可见状态行**：dsh web 不把插件 `ctx.logger` 输出路由到终端（它自己的 URL 行用裸 `console.log`），
   因此监听/禁用等操作者必须看到的状态用 `say()` / `sayWarn()`（`src/index.ts`：`ctx.logger` + `console.log`
   双写镜像）输出，格式前缀 `dsh-auth-proxy: `；禁止把请求级日志（debug 等）改成 console.log 刷屏。
@@ -57,7 +59,8 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`�
 - `@deepseek-ai/*` 只能 **type-only** 导入（`import type {}`）；值导入只允许平台种子（react 等），
   跨插件协作走 cordis 服务（`ctx.slots` / `ctx.locale`）。
 - 文案 zh/en 双语：key 注册在 `src/client/locales.ts` 的 `AuthProxyKey` 联合类型，**新增 key 必须两语齐全**。
-- 卡片走插件自有 `/api/dsh-auth-proxy/config`（dsh-settings 客户端暴露白名单对第三方封闭，勿改走 settings scope）。
+- 卡片经 `ctx.settingsScope` 读写 `dsh-auth-proxy` 命名空间，注册进 `settings.plugin.item`（keyed 于命名空间）；
+  仅 `GET /api/dsh-auth-proxy/status` 作只读运行态探测（listening / tokenSet / accessUrls），不做任何写。
 
 ## 已知边界（勿当 bug 误修）
 
@@ -76,5 +79,6 @@ npm run build
 npm run smoke
 ```
 
-`npm run smoke` 驱动构建产物（`scripts/smoke.mjs`，stub cordis ctx + 临时 `DSH_HOME` 隔离真实用户配置），
-覆盖：空/占位令牌不监听、登录流程、XFF 伪造不绕过白名单、PUT 热更新不重建、PUT 改端口重建、PUT 占位令牌禁用。
+`npm run smoke` 驱动构建产物（`scripts/smoke.mjs`，stub cordis ctx + 内存 settings provider，隔离真实用户配置），
+覆盖：空/占位令牌不监听、登录流程、XFF 伪造不绕过白名单、settings 写热更新不重建、settings 写改端口重建、
+settings 写占位令牌禁用、settings 校验拒绝公网监听地址。

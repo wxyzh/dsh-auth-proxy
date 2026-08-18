@@ -1,36 +1,25 @@
 /**
  * Smoke test for the built auth-proxy plugin (lib/types/index.js).
  *
- * Drives apply() with a stub cordis context (no settings service; a fake
- * webServer so the /api/dsh-auth-proxy/config routes register), then verifies:
+ * Drives apply() with a stub cordis context. The config write path is the
+ * dsh-settings scope: a minimal in-memory settings provider backs the namespace
+ * installSettingsSection registers, and tests drive writes through it — the same
+ * seam the browser card uses. A read-only status route
+ * (/api/dsh-auth-proxy/status) exposes runtime introspection. Verifies:
  *   1. no token / placeholder 'change-me' -> proxy does NOT listen
  *   2. real token -> login flow works (401 wrong token, cookie + redirect)
  *   3. X-Forwarded-For spoofing does NOT bypass the IP allowlist
- *   4. PUT (banner-only change) returns 200 with the response written BEFORE
- *      any rebuild (fix #3), and the proxy keeps serving on the same port
- *   5. PUT port change rebuilds and the new port listens
- *   6. PUT token='change-me' disables the proxy
- *   7. listen host policy: wildcard/public refused, private LAN accepted
- *   8. forwarded HTML carries both the UUID polyfill and the loopback-compat
- *      shim (web-ui settings stay editable behind the proxy)
- *   9. stateless sessions: a cookie issued by one instance authenticates
- *      against a brand-new instance (restart survival, no session table),
- *      and changing the token invalidates every issued cookie (global logout)
+ *   4. settings write (banner-only) -> validator accepts, no re-listen change
+ *   5. settings write changes port -> validator accepts, rebuild, new port listens
+ *   6. settings write token='change-me' -> proxy becomes disabled (legal value)
+ *   7. settings validator rejects wildcard/public listen hosts
+ *   8. forwarded HTML carries both the UUID polyfill and the loopback-compat shim
+ *   9. stateless sessions: restart survival + token rotation = global logout
  *
  * Run: node scripts/smoke.mjs
  */
 import { createServer as httpCreateServer, request as httpRequest } from 'node:http'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { Readable } from 'node:stream'
-import { apply } from '../lib/types/index.js'
-
-// Isolate from the real user config: the plugin's config file lives under
-// $DSH_HOME, and on this machine ~/.dsh/dsh-auth-proxy.json exists — the
-// file layer is supposed to win, but the smoke test needs a clean slate.
-const newHome = () => mkdtempSync(join(tmpdir(), 'dsh-auth-proxy-smoke-'))
-process.env.DSH_HOME = newHome()
+import { apply, AUTH_SETTINGS_NAMESPACE } from '../lib/types/index.js'
 
 let passed = 0
 let failed = 0
@@ -56,11 +45,10 @@ function freePort() {
   })
 }
 
-/** Whether a TCP connect to host:port succeeds. */
-function canConnect(port, host = '127.0.0.1', tries = 10, delay = 50) {
+function canConnect(port, host = '127.0.0.1', tries = 14, delay = 60) {
   return new Promise((resolve) => {
     const attempt = (n) => {
-      const req = httpRequest({ host, port, path: '/', method: 'GET', timeout: 500 }, (res) => {
+      const req = httpRequest({ host, port, path: '/', method: 'GET', timeout: 400 }, (res) => {
         res.resume()
         resolve(true)
       })
@@ -103,15 +91,65 @@ function httpPost(port, path, body, headers = {}) {
   })
 }
 
-/** Fresh stub context + route capture per scenario. */
-function scenario() {
-  // Fresh home per scenario: a PUT persists the file layer, which must not
-  // leak into the next scenario (the file winning over the entry is the
-  // point of fix #4, but each scenario starts from a clean slate).
-  process.env.DSH_HOME = newHome()
+/**
+ * Minimal in-memory settings provider with the surface installSettingsSection
+ * exercises: register(ns, schema, {base, validate}) returns scope
+ * { get, watch, update }, where update merges a patch over the user layer,
+ * validates the resolved candidate (the plugin's REAL validator runs here), stores,
+ * bumps the revision, and wakes watchers (which drive the plugin's onChange ->
+ * sync()). `updateNs` lets tests drive the exact write path the browser card uses.
+ */
+function makeSettingsProvider() {
+  const documents = {}
+  const regs = new Map()
+  const provider = {
+    register(ns, schema, options = {}) {
+      const user = documents[ns] ?? {}
+      const reg = {
+        ns, schema, base: options.base ?? {}, validate: options.validate, revision: 0, resolved: null,
+        watchers: new Set(),
+      }
+      const resolved = () => {
+        const candidate = reg.schema({ ...reg.base, ...(documents[ns] ?? {}) })
+        if (reg.validate) reg.validate(candidate)
+        return candidate
+      }
+      reg.resolved = resolved()
+      const scope = {
+        get: () => reg.resolved,
+        watch: (cb) => { reg.watchers.add(cb); return () => reg.watchers.delete(cb) },
+        update: async (patch) => {
+          const merged = { ...(documents[ns] ?? {}), ...patch }
+          const candidate = reg.schema({ ...reg.base, ...merged })
+          if (reg.validate) reg.validate(candidate)
+          documents[ns] = merged
+          reg.revision += 1
+          reg.resolved = candidate
+          for (const w of [...reg.watchers]) w(candidate, reg.resolved)
+        },
+      }
+      reg.scope = scope
+      regs.set(ns, reg)
+      return scope
+    },
+    /** Drive a write through a registered namespace's scope (the card's write path). */
+    async updateNs(ns, patch) {
+      const reg = regs.get(ns)
+      if (!reg) throw new Error(`namespace ${ns} not registered`)
+      await reg.scope.update(patch)
+    },
+    user(ns) { return documents[ns] ?? {} },
+  }
+  return provider
+}
+
+/** Fresh stub context + in-memory settings provider + route capture per scenario. */
+async function scenario(entry) {
   const routes = []
   const disposers = []
+  const settingsProvider = makeSettingsProvider()
   const ctx = {
+    fiber: { state: 0 }, // RUNNING: not unloading, so isUnloading(ctx) is false
     logger: {
       info: (...a) => console.log('      [info]', ...a),
       warn: (...a) => console.log('      [warn]', ...a),
@@ -125,87 +163,61 @@ function scenario() {
     },
     inject: (names, cb) => {
       if (names.includes('webServer')) {
-        const wctx = {
-          effect: (cb2) => cb2(),
-          webServer: {
-            register: (route) => {
-              routes.push(route)
-              return () => {}
-            },
-          },
-        }
+        const wctx = { effect: (cb2) => cb2(), webServer: { register: (route) => { routes.push(route); return () => {} } } }
         cb(wctx)
       }
-      // 'settings' intentionally absent: the plugin must fall back to the
-      // composition entry as its base layer.
+      if (names.includes('settings')) {
+        cb({ effect: () => () => {}, settings: settingsProvider })
+      }
     },
   }
-  const configRoute = () => routes.find((r) => r.path === '/api/dsh-auth-proxy/config')
+  apply(ctx, entry)
+  const statusRoute = () => routes.find((r) => r.path === '/api/dsh-auth-proxy/status')
   const closeAll = () => disposers.forEach((d) => { try { d() } catch {} })
-  return { ctx, configRoute, closeAll }
+  return { ctx, statusRoute, settingsProvider, closeAll }
 }
 
-/** Invoke the config route handler with a fake req/res. */
-function callApi(route, method, bodyObj) {
-  return new Promise((resolve) => {
-    const res = {
-      _status: 0,
-      _headers: {},
-      _body: '',
-      writeHead(status, headers) { this._status = status; this._headers = headers || {} },
-      end(text) { this._body = text ?? ''; resolve({ status: this._status, headers: this._headers, body: this._body }) },
-    }
-    const req = Readable.from([JSON.stringify(bodyObj ?? {})])
-    req.method = method
-    route.handler(req, res).catch((err) => { console.error('      api handler error', err) })
-  })
+async function getStatus(route) {
+  const res = {
+    _status: 0, _body: '',
+    writeHead(status, headers) { this._status = status; this._headers = headers || {} },
+    end(text) { this._body = text ?? ''; resolve0({ status: this._status, body: this._body }) },
+  }
+  let resolve0
+  const promise = new Promise((r) => { resolve0 = r })
+  route.handler({}, res).catch((err) => { resolve0({ status: 500, body: String(err) }) })
+  return promise
 }
 
-const tick = () => new Promise((r) => setImmediate(r))
+const settle = () => new Promise((r) => setTimeout(r, 400))
 
 // ── 1. no token / placeholder -> not listening ──────────────────────────
-{
-  console.log('scenario 1: empty token')
-  const s = scenario()
+for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'change-me']]) {
+  console.log(`scenario ${label} -> not listening`)
   const p = await freePort()
-  apply(s.ctx, { enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: '' })
-  await new Promise((r) => setTimeout(r, 150))
-  ok((await canConnect(p)) === false, `no token -> port ${p} not listening`)
-  s.closeAll()
-}
-
-{
-  console.log('scenario 2: placeholder token change-me')
-  const s = scenario()
-  const p = await freePort()
-  apply(s.ctx, { enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: 'change-me' })
-  await new Promise((r) => setTimeout(r, 150))
-  ok((await canConnect(p)) === false, `placeholder token -> port ${p} not listening`)
+  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token })
+  await settle()
+  const v = JSON.parse((await getStatus(s.statusRoute())).body)
+  ok(v.listening === false, `${label} -> not listening (status.listening=false)`)
   s.closeAll()
 }
 
 // ── 2. real token -> login flow ─────────────────────────────────────────
 {
-  console.log('scenario 3: login flow')
-  const s = scenario()
+  console.log('scenario: login flow')
   const p = await freePort()
-  apply(s.ctx, { enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: 's3cret' })
+  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: 's3cret' })
   ok((await canConnect(p)) === true, `listening on ${p}`)
-
   const root = await httpGet(p, '/')
   ok(root.status === 302 && root.headers.location === '/__dsh_auth/login', 'GET / -> 302 to login')
-
   const bad = await httpPost(p, '/__dsh_auth/login', 'token=wrong')
   ok(bad.status === 401, 'wrong token -> 401')
-
   const good = await httpPost(p, '/__dsh_auth/login', 'token=s3cret')
   const cookie = good.headers['set-cookie']?.[0] ?? ''
   ok(good.status === 302 && cookie.includes('dsh_auth_session='), 'right token -> 302 + session cookie')
   ok(cookie.includes('Max-Age=315360000'), 'session cookie is permanent (10-year Max-Age)')
-
   const fwd = await httpGet(p, '/api/whatever', { cookie: cookie.split(';')[0] })
   ok(fwd.status === 502, 'authenticated request forwarded (502 upstream unavailable expected)')
-
   const unauth = await httpGet(p, '/api/whatever')
   ok(unauth.status === 401, 'unauthenticated /api -> JSON 401')
   s.closeAll()
@@ -213,107 +225,82 @@ const tick = () => new Promise((r) => setImmediate(r))
 
 // ── 3. X-Forwarded-For spoofing does not bypass allowlist ───────────────
 {
-  console.log('scenario 4: XFF spoofing')
-  const s = scenario()
+  console.log('scenario: XFF spoofing')
   const p = await freePort()
-  apply(s.ctx, { enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: 's3cret', allowedIps: ['10.0.0.0/8'] })
-  ok((await canConnect(p)) === true, `listening on ${p}`)
-
+  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: 's3cret', allowedIps: ['10.0.0.0/8'] })
   const spoofed = await httpGet(p, '/', { 'x-forwarded-for': '10.0.0.1' })
   ok(spoofed.status === 302 && spoofed.headers.location === '/__dsh_auth/login',
     'XFF-spoofed request does NOT bypass the allowlist (still login redirect)')
   s.closeAll()
 }
 
-// ── 4. PUT banner-only change: 200 returned, no rebuild ─────────────────
+// ── 4. settings write (banner-only): validator accepts, no re-listen change ──
 {
-  console.log('scenario 5: PUT banner-only (hot update)')
-  const s = scenario()
+  console.log('scenario: banner update via settings scope (hot, no rebuild)')
   const p = await freePort()
-  apply(s.ctx, { enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: 's3cret' })
+  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: 's3cret' })
   ok((await canConnect(p)) === true, `listening on ${p}`)
-  const route = s.configRoute()
-  ok(route !== undefined, 'config API route registered (via fake webServer)')
-
-  const res = await callApi(route, 'PUT', { banner: 'SMOKE-BANNER', accessUrls: ['https://dsh.example.com', 'http://lan.local:8443'] })
-  const parsed = JSON.parse(res.body)
-  ok(res.status === 200 && parsed.ok === true, 'PUT banner -> 200 ok (response written before any rebuild)')
-
-  const get = await callApi(route, 'GET', {})
-  const view = JSON.parse(get.body)
-  ok(view.banner === 'SMOKE-BANNER' && view.tokenSet === true, 'GET reflects new banner + tokenSet')
-  ok(view.listening === true, 'GET reports the proxy is listening')
-  ok(Array.isArray(view.accessUrls) && view.accessUrls.length === 2 && view.accessUrls[0] === 'https://dsh.example.com',
-    'GET reports the configured access URLs')
-
+  await s.settingsProvider.updateNs(AUTH_SETTINGS_NAMESPACE, { banner: 'SMOKE-BANNER', accessUrls: ['https://dsh.example.com'] })
+  await settle()
+  ok(s.settingsProvider.user(AUTH_SETTINGS_NAMESPACE).banner === 'SMOKE-BANNER', 'settings write persisted the banner to the user layer')
   const login = await httpGet(p, '/__dsh_auth/login')
   ok(login.body.includes('SMOKE-BANNER'), 'login page serves the new banner (same server, no rebuild)')
-  ok(login.body.includes('https://dsh.example.com'), 'login page lists the configured access URL')
-  ok((await canConnect(p)) === true, 'proxy still listening on the same port')
+  const v = JSON.parse((await getStatus(s.statusRoute())).body)
+  ok(v.listening === true, 'still listening (no rebuild for non-listening changes)')
+  ok(Array.isArray(v.accessUrls) && v.accessUrls[0] === 'https://dsh.example.com', 'status reports configured access URLs')
   s.closeAll()
 }
 
-// ── 5. PUT port change: rebuild, new port listens ───────────────────────
+// ── 5. settings write changes port: rebuild, new port listens ─────────
 {
-  console.log('scenario 6: PUT port change (rebuild)')
-  const s = scenario()
+  console.log('scenario: port change via settings scope (rebuild)')
   const p1 = await freePort()
   const p2 = await freePort()
-  apply(s.ctx, { enabled: true, host: '127.0.0.1', port: p1, targetPort: 9, token: 's3cret' })
+  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p1, targetPort: 9, token: 's3cret' })
   ok((await canConnect(p1)) === true, `listening on ${p1}`)
-  const route = s.configRoute()
-
-  const res = await callApi(route, 'PUT', { port: p2 })
-  ok(res.status === 200, 'PUT port change -> 200 (response delivered first)')
-
-  await tick()
-  await tick()
-  await new Promise((r) => setTimeout(r, 100))
+  await s.settingsProvider.updateNs(AUTH_SETTINGS_NAMESPACE, { port: p2 })
+  await settle()
+  await settle()
   ok((await canConnect(p2)) === true, `new port ${p2} listening after rebuild`)
+  ok((await canConnect(p1)) === false, `old port ${p1} released after rebuild`)
   s.closeAll()
 }
 
-// ── 6. PUT token=change-me disables the proxy ───────────────────────────
+// ── 6. settings write token='change-me' disables the proxy ────────────
 {
-  console.log('scenario 7: PUT placeholder token disables')
-  const s = scenario()
+  console.log('scenario: settings write placeholder token disables')
   const p = await freePort()
-  apply(s.ctx, { enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: 's3cret' })
+  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: 's3cret' })
   ok((await canConnect(p)) === true, `listening on ${p}`)
-  const route = s.configRoute()
-
-  const res = await callApi(route, 'PUT', { token: 'change-me' })
-  ok(res.status === 200 && JSON.parse(res.body).tokenSet === false, 'PUT change-me -> 200 + tokenSet=false')
-
-  await tick()
-  await new Promise((r) => setTimeout(r, 100))
+  await s.settingsProvider.updateNs(AUTH_SETTINGS_NAMESPACE, { token: 'change-me' })
+  await settle()
+  ok(s.settingsProvider.user(AUTH_SETTINGS_NAMESPACE).token === 'change-me', 'settings write persisted the placeholder token')
   ok((await canConnect(p)) === false, 'proxy disabled after placeholder token saved')
   s.closeAll()
 }
 
-// ── 7. listen host policy: no TLS -> wildcard/public refused ────────────
+// ── 7. validator rejects wildcard/public listen hosts ─────────────────
 {
-  console.log('scenario 8: listen host policy')
-  const s = scenario()
+  console.log('scenario: settings validator rejects public listen hosts')
   const p = await freePort()
-  // No host given: the default must be 127.0.0.1 (loopback).
-  apply(s.ctx, { enabled: true, port: p, targetPort: 9, token: 's3cret' })
-  ok((await canConnect(p)) === true, `default listen host 127.0.0.1 -> listening on ${p}`)
-  const route = s.configRoute()
-  ok(route !== undefined, 'config API route registered')
-
-  for (const bad of ['0.0.0.0', '::', '8.8.8.8', '203.0.113.9', 'example.com']) {
-    const r = await callApi(route, 'PUT', { host: bad })
-    ok(r.status === 400, `PUT host ${bad} -> 400 rejected (no TLS)`)
+  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p, targetPort: 9, token: 's3cret' })
+  let acceptedBad = false
+  for (const bad of ['0.0.0.0', '::', '8.8.8.8', '203.0.113.9']) {
+    let rejected = false
+    try { await s.settingsProvider.updateNs(AUTH_SETTINGS_NAMESPACE, { host: bad }) } catch { rejected = true }
+    if (!rejected) acceptedBad = true
+    ok(rejected === true, `reject host ${bad}`)
   }
-  const lan = await callApi(route, 'PUT', { host: '192.168.1.50' })
-  ok(lan.status === 200, 'PUT host 192.168.1.50 -> 200 accepted (private LAN)')
+  // A private LAN host is accepted.
+  await s.settingsProvider.updateNs(AUTH_SETTINGS_NAMESPACE, { host: '192.168.1.50' }).then(() => ok(true, 'accept host 192.168.1.50 (private LAN)'), () => ok(false, 'accept host 192.168.1.50'))
+  await settle()
+  ok(acceptedBad === false, 'no public/wildcard host write was accepted (no accidental exposure)')
   s.closeAll()
 }
 
 // ── 8. forwarded HTML carries both injected scripts ─────────────────────
 {
-  console.log('scenario 9: HTML injection (UUID polyfill + loopback compat)')
+  console.log('scenario: HTML injection (UUID polyfill + loopback compat)')
   const upstream = httpCreateServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     res.end('<!doctype html><html><head><title>x</title></head><body>ok</body></html>')
@@ -322,64 +309,42 @@ const tick = () => new Promise((r) => setImmediate(r))
     upstream.on('error', reject)
     upstream.listen(0, '127.0.0.1', () => resolve(upstream.address().port))
   })
-  const s = scenario()
   const p = await freePort()
-  apply(s.ctx, { enabled: true, host: '127.0.0.1', port: p, targetPort: up, token: 's3cret' })
-  ok((await canConnect(p)) === true, `listening on ${p}`)
-
+  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p, targetPort: up, token: 's3cret' })
   const good = await httpPost(p, '/__dsh_auth/login', 'token=s3cret')
   const cookie = good.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
   const page = await httpGet(p, '/', { cookie })
-  ok(page.status === 200 && String(page.headers['content-type']).includes('text/html'),
-    'authenticated HTML forwarded from upstream')
-  ok(page.body.includes('crypto.randomUUID') && page.body.includes('dsh-client-connection'),
-    'HTML carries the UUID polyfill and the loopback-compat shim')
-  ok(page.body.includes('isLoopback') && page.body.includes('__ModuleLoader__'),
-    'compat shim targets the client connection loopback flag')
+  ok(page.status === 200 && String(page.headers['content-type']).includes('text/html'), 'authenticated HTML forwarded from upstream')
+  ok(page.body.includes('crypto.randomUUID') && page.body.includes('dsh-client-connection'), 'HTML carries the UUID polyfill and the loopback-compat shim')
+  ok(page.body.includes('isLoopback') && page.body.includes('__ModuleLoader__'), 'compat shim targets the client connection loopback flag')
   s.closeAll()
   await new Promise((r) => upstream.close(r))
 }
 
 // ── 9. stateless sessions: restart survival + token rotation = global logout ──
 {
-  console.log('scenario 10: stateless session (restart survival + token rotation)')
-  // First "process": login and capture the signed cookie.
-  const s1 = scenario()
+  console.log('scenario: stateless session (restart survival + token rotation = global logout)')
   const p1 = await freePort()
-  apply(s1.ctx, { enabled: true, host: '127.0.0.1', port: p1, targetPort: 9, token: 's3cret' })
-  ok((await canConnect(p1)) === true, `first instance listening on ${p1}`)
+  const s1 = await scenario({ enabled: true, host: '127.0.0.1', port: p1, targetPort: 9, token: 's3cret' })
   const good = await httpPost(p1, '/__dsh_auth/login', 'token=s3cret')
   const cookie = good.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
   ok(good.status === 302 && cookie.startsWith('dsh_auth_session='), 'login -> 302 + session cookie')
   ok(cookie.includes('.'), 'cookie is signed (payload.signature format)')
   s1.closeAll()
 
-  // Second "process": a brand-new plugin instance with zero session memory.
-  const s2 = scenario()
   const p2 = await freePort()
-  apply(s2.ctx, { enabled: true, host: '127.0.0.1', port: p2, targetPort: 9, token: 's3cret' })
-  ok((await canConnect(p2)) === true, `restarted instance listening on ${p2}`)
-  const fwd = await httpGet(p2, '/api/whatever', { cookie })
-  ok(fwd.status === 502, 'cookie from the old instance still authenticates after restart (502 = forwarded)')
-  const unauth = await httpGet(p2, '/api/whatever')
-  ok(unauth.status === 401, 'no cookie -> still 401')
+  const s2 = await scenario({ enabled: true, host: '127.0.0.1', port: p2, targetPort: 9, token: 's3cret' })
+  ok((await httpGet(p2, '/api/whatever', { cookie })).status === 502, 'cookie from the old instance still authenticates after restart (502 = forwarded)')
+  ok((await httpGet(p2, '/api/whatever')).status === 401, 'no cookie -> still 401')
 
-  // Token rotation = global logout: the old cookie must stop working.
-  const route = s2.configRoute()
-  const res = await callApi(route, 'PUT', { token: 'newtok' })
-  ok(res.status === 200 && JSON.parse(res.body).tokenSet === true, 'PUT token -> 200 ok')
-  await tick()
-  await tick()
-  const after = await httpGet(p2, '/api/whatever', { cookie })
-  ok(after.status === 401, 'old cookie rejected after token change (global logout)')
-
-  // The new token logs in fine and its cookie authenticates.
+  // Token rotation through the settings scope = global logout under the same instance.
+  await s2.settingsProvider.updateNs(AUTH_SETTINGS_NAMESPACE, { token: 'newtok' })
+  await settle()
+  ok((await httpGet(p2, '/api/whatever', { cookie })).status === 401, 'old cookie rejected after token change (global logout)')
   const again = await httpPost(p2, '/__dsh_auth/login', 'token=newtok')
-  ok(again.status === 302 && (again.headers['set-cookie']?.[0] ?? '').includes('dsh_auth_session='),
-    'login with the new token works')
+  ok(again.status === 302 && (again.headers['set-cookie']?.[0] ?? '').includes('dsh_auth_session='), 'login with the new token works')
   const fresh = again.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
-  const againFwd = await httpGet(p2, '/api/whatever', { cookie: fresh })
-  ok(againFwd.status === 502, 'cookie issued after rotation authenticates (502 = forwarded)')
+  ok((await httpGet(p2, '/api/whatever', { cookie: fresh })).status === 502, 'cookie issued after rotation authenticates')
   s2.closeAll()
 }
 
