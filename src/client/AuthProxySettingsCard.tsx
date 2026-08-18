@@ -1,10 +1,10 @@
 /**
- * The auth-proxy settings card. Reads and writes the `dsh-auth-proxy` settings
- * namespace through the official `settingsScope` handle (revision-fenced,
- * validated and persisted Host-side), and shows runtime introspection (listening,
- * token configured) from the plugin's read-only status endpoint. Uses inline
- * styles bound to the dsh `--dsw-alias-*` design tokens so the card follows
- * the active skin/theme (light and dark).
+ * The auth-proxy settings page (a `settings.section` entry). Reads and writes the
+ * `dsh-auth-proxy` settings namespace through the official `settingsScope` handle
+ * (revision-fenced, validated and persisted Host-side), and shows runtime
+ * introspection (listening, token configured) from the plugin's read-only status
+ * endpoint. Uses inline styles bound to the dsh `--dsw-alias-*` design tokens
+ * so the page follows the active skin/theme (light and dark).
  */
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
@@ -38,14 +38,16 @@ interface StatusView {
 export interface AuthProxyCardFace {
   /** Reactive handle over the `dsh-auth-proxy` namespace section. */
   scope: SettingsScope<AuthProxySection>
-  /** Sync snapshot source for the card's form. */
+  /** Sync snapshot source for the page's form. */
   getSnapshot: () => SettingsScopeSnapshot<AuthProxySection>
 }
 
-/** Card component props: the locale `t` seat plus our injected face. */
-export type AuthProxyCardProps = AuthProxyCardFace & {
+/** Page component props: the locale `t` seat, the slot owner's `close`, and our face. */
+export type AuthProxySectionProps = AuthProxyCardFace & {
   /** Translate a dictionary key of the `auth-proxy` namespace. */
   t: (key: string) => string
+  /** Close the settings panel (the shell owns the open state). */
+  close: () => void
 }
 
 /** Multi-line list helper: render a stored list as comma/whitespace-separated text. */
@@ -59,13 +61,13 @@ function fromText(text: string): string[] {
 }
 
 /**
- * Render the auth-proxy configuration card. The form stages local drafts and, only
+ * Render the auth-proxy configuration page. The form stages local drafts and, only
  * on Save, issues revision-fenced writes through the settings scope — the Host is
  * the sole authority on whether each write lands.
- * @param props - locale reader, the bound scope, and its snapshot source.
- * @returns the card.
+ * @param props - locale reader, the bound scope, its snapshot source, and close.
+ * @returns the page.
  */
-export function AuthProxySettingsCard({ t, scope, getSnapshot }: AuthProxyCardProps) {
+export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProxySectionProps) {
   const snapshot = useSyncExternalStore<SettingsScopeSnapshot<AuthProxySection>>(
     (cb) => scope.subscribe(cb),
     getSnapshot,
@@ -75,7 +77,6 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot }: AuthProxyCardPr
   const writable = snapshot.writable
   const revision = snapshot.revision
 
-  const [open, setOpen] = useState(false)
   const [status, setStatus] = useState<StatusView | null>(null)
 
   // One staged string per editable field.
@@ -164,10 +165,9 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot }: AuthProxyCardPr
       await scope.set('accessUrls', fromText(accessUrls))
       await scope.set('maxFailures', Number(maxFailures))
       await scope.set('lockoutMinutes', Number(lockoutMinutes))
-      // The scope reloads after writes; fonts out of band.
+      // The scope reloads after writes; refetch the runtime status post-save.
       setTokenDraft('')
       setDirty(false)
-      // Refetch the runtime status now that config changed.
       const res = await fetch('/api/dsh-auth-proxy/status')
       if (res.ok) setStatus(await res.json() as StatusView)
     } catch (err) {
@@ -181,83 +181,75 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot }: AuthProxyCardPr
   const downloading = !available
 
   return (
-    <li style={styles.card}>
-      <button
-        type="button"
-        style={styles.header}
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-      >
-        <span style={styles.name}>{t('title')}</span>
-        <span style={styles.description}>{t('description')}</span>
-        {dirty ? <span style={styles.unsavedBadge}>{t('settings.unsaved')}</span> : null}
-        <span style={styles.chevron}>{open ? '▾' : '▸'}</span>
-      </button>
-      {open && (
-        <div style={styles.body}>
-          {downloading ? <p style={styles.status}>{t('settings.loading')}…</p> : null}
-          {!writable ? <p style={styles.warning}>{t('settings.readOnly')}</p> : null}
-          {status && (
-            <p style={{ ...styles.status, ...(status.listening ? styles.statusOk : styles.statusWarn) }}>
-              {status.listening
-                ? `${t('status.listening')} http://${host}:${port}`
-                : t('status.disabled')}
-            </p>
-          )}
-          {status && status.accessUrls.length > 0 && (
-            <p style={styles.accessUrls}>
-              {t('status.accessUrls')}:{' '}
-              {status.accessUrls.map((u, i) => (
-                <a key={u} href={u} style={styles.accessLink}>
-                  {u}{i < status.accessUrls.length - 1 ? '、' : ''}
-                </a>
-              ))}
-            </p>
-          )}
-          <div style={styles.checkbox}>
-            <input
-              id="auth-proxy-enabled"
-              type="checkbox"
-              style={styles.check}
-              checked={enabled}
-              onChange={(e) => { setEnabled((e.target as HTMLInputElement).checked); mark() }}
-            />
-            <label htmlFor="auth-proxy-enabled" style={styles.label}>{t('fields.enabled')}</label>
-          </div>
-          <div style={styles.row}>
-            <Field label={t('fields.port')} numeric value={port} onChange={(v) => { setPort(v); mark() }} width="half" />
-            <Field label={t('fields.targetPort')} numeric value={targetPort} onChange={(v) => { setTargetPort(v); mark() }} width="half" />
-          </div>
-          <div style={styles.row}>
-            <Field label={t('fields.host')} value={host} onChange={(v) => { setHost(v); mark() }} width="half" />
-            <Field label={t('fields.targetHost')} value={targetHost} onChange={(v) => { setTargetHost(v); mark() }} width="half" />
-          </div>
-          <Field
-            label={t('fields.token')}
-            value={tokenDraft}
-            onChange={(v) => { setTokenDraft(v); mark() }}
-            hint={status && status.tokenSet ? t('fields.tokenHint') : undefined}
-            type="password"
-          />
-          <Field label={t('fields.allowedIps')} value={allowedIps} onChange={(v) => { setAllowedIps(v); mark() }} />
-          <Field label={t('fields.banner')} value={banner} onChange={(v) => { setBanner(v); mark() }} />
-          <Field label={t('fields.accessUrls')} value={accessUrls} onChange={(v) => { setAccessUrls(v); mark() }} />
-          <div style={styles.row}>
-            <Field label={t('fields.maxFailures')} numeric value={maxFailures} onChange={(v) => { setMaxFailures(v); mark() }} width="half" />
-            <Field label={t('fields.lockoutMinutes')} numeric value={lockoutMinutes} onChange={(v) => { setLockoutMinutes(v); mark() }} width="half" />
-          </div>
-          {failed ? <p style={styles.error}>{error ?? t('settings.saveFailed')}</p> : null}
-          <div style={styles.footer}>
-            <button type="button" style={{ ...styles.button, ...styles.discard }} disabled={!dirty || saving} onClick={discard}>
-              {t('settings.discard')}
-            </button>
-            <button type="button" style={{ ...styles.button, ...styles.save }} disabled={!dirty || saving || !writable} onClick={save}>
-              {t(saving ? 'settings.saving' : 'settings.save')}
-            </button>
-          </div>
-        </div>
+    <div style={styles.page}>
+      <h2 style={styles.heading}>{t('title')}</h2>
+      <p style={styles.lead}>{t('description')}</p>
+
+      {downloading ? <p style={styles.status}>{t('settings.loading')}…</p> : null}
+      {!writable ? <p style={styles.warning}>{t('settings.readOnly')}</p> : null}
+      {status && (
+        <p style={{ ...styles.status, ...(status.listening ? styles.statusOk : styles.statusWarn) }}>
+          {status.listening
+            ? `${t('status.listening')} http://${host}:${port}`
+            : t('status.disabled')}
+        </p>
       )}
-    </li>
+      {status && status.accessUrls.length > 0 && (
+        <p style={styles.accessUrls}>
+          {t('status.accessUrls')}:{' '}
+          {status.accessUrls.map((u, i) => (
+            <span key={u}>
+              <a href={u} style={styles.accessLink}>{u}</a>{i < status.accessUrls.length - 1 ? '、' : ''}
+            </span>
+          ))}
+        </p>
+      )}
+
+      <div style={styles.checkbox}>
+        <input
+          id="auth-proxy-enabled"
+          type="checkbox"
+          style={styles.check}
+          checked={enabled}
+          onChange={(e) => { setEnabled((e.target as HTMLInputElement).checked); mark() }}
+        />
+        <label htmlFor="auth-proxy-enabled" style={styles.label}>{t('fields.enabled')}</label>
+      </div>
+
+      <div style={styles.grid}>
+        <div>
+          <Field label={t('fields.port')} numeric value={port} onChange={(v) => { setPort(v); mark() }} />
+          <Field label={t('fields.host')} value={host} onChange={(v) => { setHost(v); mark() }} />
+          <Field label={t('fields.maxFailures')} numeric value={maxFailures} onChange={(v) => { setMaxFailures(v); mark() }} />
+        </div>
+        <div>
+          <Field label={t('fields.targetPort')} numeric value={targetPort} onChange={(v) => { setTargetPort(v); mark() }} />
+          <Field label={t('fields.targetHost')} value={targetHost} onChange={(v) => { setTargetHost(v); mark() }} />
+          <Field label={t('fields.lockoutMinutes')} numeric value={lockoutMinutes} onChange={(v) => { setLockoutMinutes(v); mark() }} />
+        </div>
+      </div>
+
+      <Field
+        label={t('fields.token')}
+        value={tokenDraft}
+        onChange={(v) => { setTokenDraft(v); mark() }}
+        hint={status && status.tokenSet ? t('fields.tokenHint') : undefined}
+        type="password"
+      />
+      <Field label={t('fields.allowedIps')} value={allowedIps} onChange={(v) => { setAllowedIps(v); mark() }} />
+      <Field label={t('fields.banner')} value={banner} onChange={(v) => { setBanner(v); mark() }} />
+      <Field label={t('fields.accessUrls')} value={accessUrls} onChange={(v) => { setAccessUrls(v); mark() }} hint={t('fields.accessUrlsHint')} />
+
+      {failed ? <p style={styles.error}>{error ?? t('settings.saveFailed')}</p> : null}
+      <div style={styles.footer}>
+        <button type="button" style={{ ...styles.button, ...styles.discard }} disabled={!dirty || saving} onClick={discard}>
+          {t('settings.discard')}
+        </button>
+        <button type="button" style={{ ...styles.button, ...styles.save }} disabled={!dirty || saving || !writable} onClick={save}>
+          {t(saving ? 'settings.saving' : 'settings.save')}
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -269,11 +261,9 @@ function Field(props: {
   hint?: string
   numeric?: boolean
   type?: 'text' | 'password'
-  width?: 'full' | 'half'
 }) {
-  const style = props.width === 'half' ? { ...styles.field, ...styles.half } : styles.field
   return (
-    <div style={style}>
+    <div style={styles.field}>
       <label style={styles.label}>{props.label}</label>
       <input
         style={styles.input}
@@ -288,32 +278,22 @@ function Field(props: {
 }
 
 const styles = {
-  card: {
-    listStyle: 'none',
-    border: '1px solid var(--dsw-alias-border-l2)',
-    borderRadius: '10px',
-    margin: '4px 0',
-    background: 'var(--dsw-alias-bg-layer-3)',
-    overflow: 'hidden',
-  } as const,
-  header: {
+  page: {
     display: 'flex',
-    alignItems: 'center',
-    width: '100%',
-    background: 'transparent',
-    border: '0',
-    color: 'var(--dsw-alias-label-primary)',
-    padding: '12px 16px',
-    cursor: 'pointer',
-    fontSize: '14px',
-    textAlign: 'left' as const,
+    flexDirection: 'column' as const,
+    gap: '2px',
+    maxWidth: '680px',
+    padding: '4px 2px 20px',
   },
-  name: { fontWeight: 600, marginRight: '12px' },
-  description: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', flex: 1 },
-  chevron: { color: 'var(--dsw-alias-label-tertiary)', marginLeft: '8px' },
-  unsavedBadge: { color: '#fbbf24', fontSize: '11px', marginRight: '8px' },
-  body: { padding: '4px 16px 16px', borderTop: '1px solid var(--dsw-alias-border-l2)' },
+  heading: {
+    fontSize: '16px',
+    fontWeight: 650,
+    color: 'var(--dsw-alias-label-primary)',
+    margin: '0 0 4px',
+  },
+  lead: { fontSize: '13px', color: 'var(--dsw-alias-label-secondary)', margin: '0 0 12px' },
   field: { margin: '12px 0' },
+  grid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 20px' },
   label: { display: 'block', fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginBottom: '4px' },
   input: {
     width: '100%',
@@ -326,17 +306,19 @@ const styles = {
     boxSizing: 'border-box' as const,
   },
   hint: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', margin: '4px 0 0' },
-  footer: { display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '16px' },
-  button: { padding: '6px 14px', borderRadius: '6px', border: '0', fontSize: '13px', cursor: 'pointer' },
+  footer: { display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '20px' },
+  button: { padding: '7px 16px', borderRadius: '6px', border: '0', fontSize: '13px', cursor: 'pointer' },
   save: {
     background: 'var(--dsw-alias-button-info-fill)',
     color: 'var(--dsw-alias-label-primary-foreground)',
     fontWeight: 600,
   },
   discard: { background: 'transparent', border: '1px solid var(--dsw-alias-border-l2)', color: 'var(--dsw-alias-label-secondary)' },
-  status: { fontSize: '12px', marginTop: '8px' },
+  status: { fontSize: '12px', marginTop: '4px' },
   statusOk: { color: 'var(--dsw-alias-state-success-primary)' },
   statusWarn: { color: 'var(--dsw-alias-state-warn-primary)' },
+  accessUrls: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' },
+  accessLink: { color: 'var(--dsw-alias-link-primary)' },
   error: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)', marginTop: '8px' },
   warning: {
     fontSize: '12px',
@@ -346,10 +328,6 @@ const styles = {
     padding: '8px 10px',
     margin: '12px 0',
   },
-  accessUrls: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', marginTop: '8px', lineHeight: 1.7 },
-  accessLink: { color: 'var(--dsw-alias-state-business-primary)', textDecoration: 'none', marginRight: '6px' },
-  row: { display: 'flex', gap: '12px' },
-  half: { flex: 1 },
   checkbox: { display: 'flex', alignItems: 'center', gap: '8px', margin: '12px 0' },
   check: { width: '16px', height: '16px', accentColor: 'var(--dsw-alias-button-info-fill)' },
 }

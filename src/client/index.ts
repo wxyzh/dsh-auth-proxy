@@ -1,9 +1,10 @@
 /**
  * dsh-auth-proxy — browser half. Runs inside the dsh web GUI.
  *
- * Renders the plugin configuration card into the Settings > Plugins >
- * configurable-plugins tab, keyed by the settings namespace this package
- * owns. The card reads and writes through `ctx.settingsScope`, the official
+ * Registers the auth-proxy configuration as its OWN settings section (a
+ * `settings.section` row, e.g. an entry alongside Models/General), not a card
+ * tucked inside the configurable-plugins tab, so the config gets a full-content
+ * settings page. The page reads and writes through `ctx.settingsScope`, the official
  * dsh-settings transport: field writes are revision-fenced document mutations
  * validated and persisted by the Host (and its settings provider). There is no
  * bespoke config API — the only extra route is a read-only runtime status probe.
@@ -14,15 +15,14 @@ import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-clie
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
-import { AuthProxySettingsCard, type AuthProxyCardProps } from './AuthProxySettingsCard.tsx'
+import { AuthProxySettingsCard, type AuthProxyCardFace } from './AuthProxySettingsCard.tsx'
 import { en, zh, type AuthProxyKey } from './locales.ts'
 
 /** Locale namespace this plugin owns. */
 const NS = 'auth-proxy'
 
 /**
- * The editable section this card stages over the `dsh-auth-proxy` settings
+ * The editable section this page stages over the `dsh-auth-proxy` settings
  * namespace (mirrors the Host Config schema; the token is a write-only secret
  * and is never seeded from a response).
  */
@@ -42,31 +42,42 @@ export interface AuthProxySection {
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** Auth proxy card copy. */
+    /** Auth-proxy settings page copy. */
     'auth-proxy': AuthProxyKey
   }
-}
-
-/**
- * The registrar-side business face the card's slot entry injects: the bound
- * scope plus a sync snapshot selector for the card's form.
- */
-export interface AuthProxyCardFace {
-  /** Reactive handle over the `dsh-auth-proxy` namespace section. */
-  scope: SettingsScope<AuthProxySection>
-  /** Sync snapshot source for the card's form (uSES getSnapshot). */
-  getSnapshot: () => SettingsScopeSnapshot<AuthProxySection>
 }
 
 /** Required services (fiber inject waiting — the settings transport is up first). */
 export const inject = ['slots', 'locale', 'settingsScope', 'connection', 'remote']
 
 /**
- * Mount the auth-proxy configuration card.
+ * Mount the auth-proxy settings page.
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'auth-proxy: dictionaries')
+
+  // The slot registry types are opaque to a third-party package; keep the surface
+  // loose and type the options down to what the settings slot observes.
+  const slots = ctx.slots as unknown as {
+    register: (opts: {
+      name: 'settings.section'
+      id: string
+      order: number
+      label: string
+      locale: string
+      inject: () => AuthProxyCardFace
+    }, component: unknown) => unknown
+  }
+
+  // The settings nav label is registrant-supplied, localized copy; the bind gives a
+  // stable translate for the active locale so we can name our section consistently.
+  const t = ctx.locale.bind(NS) as (key: AuthProxyKey) => string
+
+  // Broker the section registration so switching language refreshes the nav label:
+  // the settings.section contract wants registrants to re-register on locale change,
+  // and the ledger bump doubles as the shell's nav re-render trigger.
+  let section: unknown
 
   // Bind the settings scope for this namespace on this plugin's fiber. The binder
   // resolves the transport and subscribes invalidation on OUR lifecycle; the
@@ -77,21 +88,24 @@ export function apply(ctx: ClientContext): void {
     getSnapshot: () => scope.getSnapshot(),
   }
 
-  // Register the card into the configurable-plugins tab, keyed by the namespace
-  // it edits — the pairing the official tab performs without learning what the
-  // namespace means. The business face arrives through the slot `inject` factory;
-  // the locale `t` seat arrives from the slot runtime.
-  const slots = ctx.slots as unknown as {
-    inject: (key: string, cb: () => unknown) => unknown
-    register: (opts: unknown, component: unknown) => unknown
-  }
-  slots.inject('settings.plugin.item', () =>
-    slots.register(
-      { name: 'settings.plugin.item', key: 'dsh-auth-proxy', locale: NS, inject: () => face },
+  const registerSection = () => {
+    section = slots.register(
+      {
+        name: 'settings.section',
+        id: 'dsh-auth-proxy',
+        order: 300,
+        label: t('title'),
+        locale: NS,
+        inject: () => face,
+      },
       AuthProxySettingsCard as unknown,
-    ),
-  )
-}
+    )
+  }
 
-/** Type-only re-export of the card props for consumers who need the shape. */
-export type { AuthProxyCardProps }
+  registerSection()
+
+  // Refresh the section label when the active locale switches. Re-registering
+  // synchronously is the slot contract's intended mechanism: the ledger bump doubles
+  // as the shell's nav re-render trigger, and no browser timer is involved.
+  ctx.on?.('locale/change', registerSection)
+}

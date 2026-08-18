@@ -1,8 +1,8 @@
 # AGENTS.md — dsh-auth-proxy
 
 dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`（默认）监听，内置登录页校验静态令牌后，
-把 HTTP + WebSocket 转发到回环 dsh webserver（默认 `127.0.0.1:3080`）；浏览器侧在「设置 > 插件配置」
-渲染配置卡片。主仓（DSH 源码 checkout）**零改动**：webserver 保持在 127.0.0.1，本插件持有对外 socket。
+把 HTTP + WebSocket 转发到回环 dsh webserver（默认 `127.0.0.1:3080`）；浏览器侧在「设置」渲染一个独立的
+auth-proxy 配置分区（`settings.section`，与 Models/General 同级，非插件列表内的折叠卡片）。主仓（DSH 源码 checkout）**零改动**：webserver 保持在 127.0.0.1，本插件持有对外 socket。
 
 ## 仓库规则
 
@@ -33,7 +33,7 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`�
   失败计数由定时清理兜底（30 分钟扫描，闲置超 1 小时清除）。
 - **配置写入（与官方一致）**：dsh-settings scope 是**唯一写入路径**——Host 用 `installSettingsSection` 注册
   `dsh-auth-proxy` 命名空间（`base` = 组合入口，用户文档层由部署的 settings provider（如 `dsh-settings-file`）持久化，
-  无 settings 服务时退化为组合入口）；浏览器卡片经 `ctx.settingsScope` 读写（revision 栅栏，Host `validate` 把关）。
+  无 settings 服务时退化为组合入口）；浏览器配置分区经 `ctx.settingsScope` 读写（revision 栅栏，Host `validate` 把关）。
   **不存在自建的卡片配置文件**（旧的 `~/.dsh/dsh-auth-proxy.json` 权威已废弃）。监听 host 策略在
   `installSettingsSection` 的 `validate` 钩子拒绝；令牌占位符是合法存储值，代理保持禁用。
 - **监听地址（勿放开）**：无 TLS，`listenHostIssue()`（`src/index.ts`）只允许回环与内网地址
@@ -59,8 +59,9 @@ dsh Web GUI 的令牌鉴权反向代理插件：宿主侧在 `127.0.0.1:<port>`�
 - `@deepseek-ai/*` 只能 **type-only** 导入（`import type {}`）；值导入只允许平台种子（react 等），
   跨插件协作走 cordis 服务（`ctx.slots` / `ctx.locale`）。
 - 文案 zh/en 双语：key 注册在 `src/client/locales.ts` 的 `AuthProxyKey` 联合类型，**新增 key 必须两语齐全**。
-- 卡片经 `ctx.settingsScope` 读写 `dsh-auth-proxy` 命名空间，注册进 `settings.plugin.item`（keyed 于命名空间）；
-  仅 `GET /api/dsh-auth-proxy/status` 作只读运行态探测（listening / tokenSet / accessUrls），不做任何写。
+- 浏览器配置页经 `ctx.settingsScope` 读写 `dsh-auth-proxy` 命名空间，注册成一个 `settings.section` 独立设置分区
+  （`id: 'dsh-auth-proxy'`，带本地化的导航 `label`，随 `locale/change` 重注册刷新文案）；不使用 `settings.plugin.item`
+  折叠卡片。仅 `GET /api/dsh-auth-proxy/status` 作只读运行态探测（listening / tokenSet / accessUrls），不做任何写。
 
 ## 已知边界（勿当 bug 误修）
 
