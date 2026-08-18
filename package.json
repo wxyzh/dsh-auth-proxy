@@ -1,6 +1,6 @@
 {
   "name": "@wxyzh/dsh-auth-proxy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Token-auth reverse proxy for dsh web: listen on 0.0.0.0, verify a static token via a built-in login page, then forward HTTP + WebSocket to the loopback webserver. No dsh source changes.",
   "author": "wxyzh",
   "type": "module",
