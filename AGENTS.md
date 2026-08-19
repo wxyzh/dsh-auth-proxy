@@ -84,4 +84,5 @@ npm run smoke
 
 `npm run smoke` 驱动构建产物（`scripts/smoke.mjs`，stub cordis ctx + 内存 settings provider，隔离真实用户配置），
 覆盖：空/占位令牌不监听、登录流程、XFF 伪造不绕过白名单、settings 写热更新不重建、settings 写改端口重建、
-settings 写占位令牌禁用、settings 校验拒绝公网监听地址。
+settings 写占位令牌禁用、settings 校验拒绝公网监听地址、转发 HTML 双脚本注入（UUID polyfill + loopback-compat）、
+无状态会话重启存活与换令牌全体下线。

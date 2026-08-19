@@ -20,8 +20,10 @@ browser ──► auth proxy :8443 (127.0.0.1) ──► dsh webserver 127.0.0.1
   值为 `payload.signature`（HMAC-SHA256，密钥由令牌派生），服务端不存会话，**重启后 cookie 依然有效**；
   **更换令牌会使所有已登录会话立即失效**（全体下线），登出仅清除客户端 cookie。
 - IP 白名单（支持 CIDR，IPv4）可整体绕过令牌；失败登录锁定（按 IP，阈值与时长可配）。
-- 配置实时可改：Web UI「设置 > 插件配置」卡片（走插件自有 `/api/dsh-auth-proxy/config`），
-  无需改文件；对纯 HTTP 局域网地址自动注入 `crypto.randomUUID` polyfill，保证前端 RPC 可用。
+- 配置实时可改：设置页注册成一个独立的 `settings.section` 分区（与 Models/General 同级，
+  非插件列表内的折叠卡片），经 `ctx.settingsScope` 读写 `dsh-auth-proxy` 命名空间——收 revision 栅栏、
+  由 Host 的 settings `validate` 校验并持久化，非自建 HTTP 写接口；对纯 HTTP 局域网地址自动注入
+  `crypto.randomUUID` polyfill，保证前端 RPC 可用。
 - 局域网地址可正常编辑 web-ui 设置（主题、语言、插件配置等）：dsh web 客户端按页面源判定回环，
   非回环来源会把设置面降级为只读；代理转发 HTML 时注入 loopback-compat 脚本，把
   `connection.isLoopback` 打开——与代理把 Host/Origin 改回回环后服务端按回环放行的事实一致，
@@ -89,9 +91,13 @@ token: !!js process.env.DSH_AUTH_TOKEN
 
 安全默认：令牌为空或仍是占位符 `change-me` 时，**代理保持禁用、绝不监听**——只有配了真实令牌才会开放端口。
 
-**配置分层（改动前先读 `AGENTS.md`）**：解析 = base 层（dsh-settings scope，无 settings 服务时
-退化为组合入口）+ 用户文件 `~/.dsh/dsh-auth-proxy.json`（**文件层权威**）。设置卡片只写该文件；
-文件层是唯一持久存储，重启生效。GET `/api/dsh-auth-proxy/config` 只回 `tokenSet` 布尔，永不回传令牌值。
+**配置分层（改动前先读 `AGENTS.md`）**：**dsh-settings scope 是唯一写入路径**——Host 用
+`installSettingsSection` 注册 `dsh-auth-proxy` 命名空间（`base` = 组合入口，用户文档层由部署的
+settings provider（如 `dsh-settings-file`）持久化，无 settings 服务时退化为组合入口）；设置分区经
+`ctx.settingsScope` 读写，revision 栅栏 + Host `validate` 把关，监听 host 策略在 `validate` 钩子拒绝。
+**不存在自建的卡片配置文件**（旧的 `~/.dsh/dsh-auth-proxy.json` 权威已废弃）。令牌占位符是合法存储值，
+代理保持禁用。运行态只读探测走 `GET /api/dsh-auth-proxy/status`（listening / tokenSet / accessUrls），
+永不回传令牌值，只回 `tokenSet` 布尔。
 
 ## 安全说明
 
@@ -99,7 +105,7 @@ token: !!js process.env.DSH_AUTH_TOKEN
   转发前剥离 `x-forwarded-for` / `x-real-ip`。
 - **监听地址策略**：无 TLS 意味着绑到通配（`0.0.0.0`/`::`）或公网 IP 会把明文令牌暴露到网络，
   因此默认 `127.0.0.1`，且仅接受回环与内网地址（`127/8`、`10/8`、`172.16/12`、`192.168/16`、`169.254/16`、
-  `::1`）；保存（PUT）与启动（`sync()`）双重拒绝，日志与卡片会给出原因。外部访问请用 TLS 反向代理
+  `::1`）；保存时由 settings `validate` 钩子拒绝、启动时由 `sync()` 拒绝，双重把关，日志与卡片会给出原因。外部访问请用 TLS 反向代理
   （nginx/Caddy 等）终止加密后回指 `127.0.0.1:8443`，`accessUrls` 里填对外域名。
 - 无 TLS：即使仅内网监听，令牌仍经明文 HTTP 传输，同网段可嗅探。这是为局域网 HTTP 可用性做的取舍；
   需要加密传输时请在前方套 TLS 终结。
@@ -110,7 +116,8 @@ token: !!js process.env.DSH_AUTH_TOKEN
 
 - 构建：`npm run build`（`tsc` 出宿主侧 `lib/types/` + `tsdown` 出浏览器侧 `lib/client.js`）。
 - 类型检查：`npm run typecheck`。
-- 冒烟测试：`npm run smoke`（驱动构建产物，覆盖登录流程、XFF 伪造、热更新、重建、禁用）。
+- 冒烟测试：`npm run smoke`（驱动构建产物，覆盖空/占位令牌不监听、登录流程、XFF 伪造不绕过白名单、
+  热更新不重建、改端口重建、占位令牌禁用、拒绝公网监听地址、HTML 双脚本注入、无状态会话重启存活与换令牌全体下线）。
 - 仓库规则与安全不变式见 `AGENTS.md`；许可见 `LICENSE`（MIT）。
 
 ## 已知限制
