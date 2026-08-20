@@ -1,6 +1,6 @@
 {
   "name": "@wxyzh/dsh-auth-proxy",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Token-auth reverse proxy for dsh web: listen on 0.0.0.0, verify a static token via a built-in login page, then forward HTTP + WebSocket to the loopback webserver. No dsh source changes.",
   "author": "wxyzh",
   "type": "module",
@@ -44,24 +44,24 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-api-remotes": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-settings": "^0.1.0-rc.7"
+    "@deepseek-ai/dsh-api-remotes": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.8"
   },
   "dependencies": {
     "schemastery": "^3.18.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-api-remotes": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-connection": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-locale": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-ui-settings-plugins": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-settings": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-api-remotes": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-connection": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-locale": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-settings-plugins": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.8",
     "@types/node": "^22.20.1",
     "@types/react": "~18.3.1",
     "lightningcss": "^1.32.0",
