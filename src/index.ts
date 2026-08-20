@@ -312,15 +312,71 @@ const UUID_POLYFILL = `<script>
  * client flag open simply mirrors what the server already grants; the proxy
  * itself remains the token-auth edge.
  *
- * The script wraps window.__ModuleLoader__.load and, for the
- * @deepseek-ai/dsh-client-connection bundle, wraps its apply() so the
+ * The script keeps the dsh web module facade (`window.__ModuleLoader__`)
+ * alive no matter when the boot HTML materializes it, and — for the
+ * @deepseek-ai/dsh-client-connection bundle — wraps its apply() so the
  * connection handle's isLoopback is forced open right after the service is
  * provided — before any consumer plugin binds a settings scope, whatever the
  * plugin load order is.
+ *
+ * dsh rc.8 moved the facade INTO the served HTML at the top of `<head>`:
+ * `injectBootManifest` now inlines the queue facade + preloads synchronously
+ * there, while this script still runs just before `</head>`. The previous
+ * defineProperty-accessor capture therefore REPLACED the already-assigned
+ * loader with a getter that never returned it, and boot failed with
+ * `window.__ModuleLoader__ bootstrap facade is missing`. The fix: when the
+ * facade already exists, wrap its `load` in place and interpose on `create`
+ * so live-mode registrations (the loader is swapped during create) stay
+ * wrapped too; the accessor path remains only for older boots that assign
+ * the loader later.
  */
-const LOOPBACK_COMPAT_SCRIPT = `<script>
+export const LOOPBACK_COMPAT_SCRIPT = `<script>
 (function () {
+  var wrapLoad = function (load) {
+    return function (entry) {
+      if (entry && typeof entry === 'object'
+          && entry.id === '@deepseek-ai/dsh-client-connection'
+          && typeof entry.factory === 'function') {
+        var originalFactory = entry.factory;
+        entry.factory = function (require) {
+          var exports = originalFactory(require);
+          if (exports && typeof exports.apply === 'function') {
+            var originalApply = exports.apply;
+            exports.apply = function (ctx) {
+              var result = originalApply.apply(this, arguments);
+              try {
+                var handle = ctx && typeof ctx.get === 'function' ? ctx.get('connection') : undefined;
+                if (handle && typeof handle === 'object' && handle.isLoopback === false) {
+                  handle.isLoopback = true;
+                }
+              } catch (err) { /* keep the read-only behavior on failure */ }
+              return result;
+            };
+          }
+          return exports;
+        };
+      }
+      return load.apply(this, arguments);
+    };
+  };
+  // dsh rc.8: create() swaps the facade from pending-queue to live
+  // registration; re-wrap load afterwards so no registration escapes.
+  var wrapCreate = function (create) {
+    return function (options) {
+      var result = create.call(this, options);
+      if (this && typeof this.load === 'function') this.load = wrapLoad(this.load);
+      return result;
+    };
+  };
   try {
+    var existing = globalThis.__ModuleLoader__;
+    if (existing && typeof existing.load === 'function') {
+      // rc.8: the queue facade already lives on the page (head top).
+      existing.load = wrapLoad(existing.load);
+      if (typeof existing.create === 'function') existing.create = wrapCreate(existing.create);
+      return;
+    }
+    // Older boots assign the loader later; capture the assignment and wrap.
     var realLoader = undefined;
     var installed = false;
     Object.defineProperty(globalThis, '__ModuleLoader__', {
@@ -328,35 +384,12 @@ const LOOPBACK_COMPAT_SCRIPT = `<script>
       enumerable: true,
       get: function () { return realLoader; },
       set: function (loader) {
+        if (!loader || typeof loader.load !== 'function') return;
         if (installed) { realLoader = loader; return; }
         installed = true;
-        var originalLoad = loader.load.bind(loader);
-        loader.load = function (entry) {
-          if (entry && typeof entry === 'object'
-              && entry.id === '@deepseek-ai/dsh-client-connection'
-              && typeof entry.factory === 'function') {
-            var originalFactory = entry.factory;
-            entry.factory = function (require) {
-              var exports = originalFactory(require);
-              if (exports && typeof exports.apply === 'function') {
-                var originalApply = exports.apply;
-                exports.apply = function (ctx) {
-                  var result = originalApply.apply(this, arguments);
-                  try {
-                    var handle = ctx && typeof ctx.get === 'function' ? ctx.get('connection') : undefined;
-                    if (handle && typeof handle === 'object' && handle.isLoopback === false) {
-                      handle.isLoopback = true;
-                    }
-                  } catch (err) { /* keep the read-only behavior on failure */ }
-                  return result;
-                };
-              }
-              return exports;
-            };
-          }
-          return originalLoad(entry);
-        };
         realLoader = loader;
+        loader.load = wrapLoad(loader.load);
+        if (typeof loader.create === 'function') loader.create = wrapCreate(loader.create);
       }
     });
   } catch (err) { /* keep the read-only behavior on failure */ }

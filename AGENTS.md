@@ -52,7 +52,10 @@ auth-proxy 配置分区（`settings.section`，与 Models/General 同级，非�
   降级为只读；而代理把 Host/Origin 改回回环后服务端本就把代理流量当回环放行（含 privileged
   settings/credentials 方法）。该脚本在 `@deepseek-ai/dsh-client-connection` 提供服务后把
   `connection.isLoopback` 置 true，让 web-ui 设置（主题/语言/插件配置）在代理后可编辑。鉴权仍由本插件
-  令牌墙把关，脚本不新增攻击面。
+  令牌墙把关，脚本不新增攻击面。注意 rc.8：`window.__ModuleLoader__` 由 webserver 在 `<head>` 顶部内联
+  注入（`injectBootManifest` 的队列 facade + `__DSH_BOOT__`），脚本必须原地包 `load` 并在 `create()`
+  切到 live 注册后重包——**禁止用 `Object.defineProperty` 访问器覆盖已存在的 facade**（会把 loader
+  变 undefined，boot 报 bootstrap facade missing）；后续若改动此机制，冒烟用例 8b 会拦截。
 
 ## 客户端纪律
 

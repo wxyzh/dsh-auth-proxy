@@ -15,11 +15,15 @@
  *   7. settings validator rejects wildcard/public listen hosts
  *   8. forwarded HTML carries both the UUID polyfill and the loopback-compat shim
  *   9. stateless sessions: restart survival + token rotation = global logout
+ *  10. dsh rc.8 __ModuleLoader__ boot order: the queue facade at <head> top
+ *      survives the compat shim, create() keeps live-mode registration
+ *      wrapped, and the connection bundle's isLoopback is forced open
  *
  * Run: node scripts/smoke.mjs
  */
 import { createServer as httpCreateServer, request as httpRequest } from 'node:http'
-import { apply, AUTH_SETTINGS_NAMESPACE } from '../lib/types/index.js'
+import vm from 'node:vm'
+import { apply, AUTH_SETTINGS_NAMESPACE, LOOPBACK_COMPAT_SCRIPT } from '../lib/types/index.js'
 
 let passed = 0
 let failed = 0
@@ -319,6 +323,83 @@ for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'ch
   ok(page.body.includes('isLoopback') && page.body.includes('__ModuleLoader__'), 'compat shim targets the client connection loopback flag')
   s.closeAll()
   await new Promise((r) => upstream.close(r))
+}
+
+// ── 8b. dsh rc.8 loader boot order: facade survives + connection forced loopback ────
+{
+  console.log('scenario: rc.8 __ModuleLoader__ boot (facade kept alive, live registration wrapped)')
+  // Mirrors what injectBootManifest now emits at the top of <head>: the queue
+  // facade plus the two preloaded bundle registrations (modules + runtime),
+  // all executing BEFORE the compat shim (which is injected before </head>).
+  const rc8Boot = `(function () {
+    window.__ModuleLoader__ = {
+      mode: 'queue',
+      pendingQueue: [],
+      registrations: [],
+      load: function (reg) {
+        if (this.mode === 'queue') { this.pendingQueue.push(reg); return; }
+        this.registrations.push(reg);
+      },
+      create: function (options) {
+        if (this.mode !== 'queue') throw new Error('create after boot');
+        var pending = this.pendingQueue.splice(0);
+        this.mode = 'live';
+        this.load = function (reg) { this.registrations.push(reg); return reg; };
+        return { ok: true, preloaded: pending.length };
+      }
+    };
+    window.__ModuleLoader__.load({ id: '@deepseek-ai/dsh-client-modules/client', factory: function () { return {}; } });
+    window.__ModuleLoader__.load({ id: '@deepseek-ai/dsh-client-runtime/client', factory: function () { return {}; } });
+  })();`
+  const sandbox = {}
+  vm.createContext(sandbox)
+  sandbox.window = sandbox
+  // head-top boot protocol runs first
+  vm.runInContext(rc8Boot, sandbox)
+  // the compat shim runs later, just before </head>; strip its <script> shell
+  const shimBody = LOOPBACK_COMPAT_SCRIPT.replace(/^<script>\n?/, '').replace(/\n?<\/script>$/, '')
+  vm.runInContext(shimBody, sandbox)
+  // rc.7 regressed here: the accessor replaced the live facade, getter -> undefined
+  const facade = vm.runInContext('window.__ModuleLoader__', sandbox)
+  ok(typeof facade === 'object' && facade !== null && typeof facade.load === 'function', 'queue facade survives the compat shim (no bootstrap-facade-missing)')
+  ok(facade.pendingQueue.length === 2, 'preloaded registrations stay queued untouched')
+
+  // the deferred shell calls create(): materialize + switch to live registration
+  const createOut = vm.runInContext('window.__ModuleLoader__.create({})', sandbox)
+  ok(createOut && createOut.ok === true && createOut.preloaded === 2, 'create() materializes the queue without interference')
+  ok(vm.runInContext('window.__ModuleLoader__.mode', sandbox) === 'live', 'facade switched to live registration')
+
+  // dynamic bundle scripts (async) register through the LIVE load afterwards
+  const handle = { isLoopback: false }
+  const stubCtx = { get: (name) => (name === 'connection' ? handle : undefined) }
+  vm.runInContext(`window.__ModuleLoader__.load({
+    id: '@deepseek-ai/dsh-client-connection',
+    factory: function (require) {
+      return {
+        apply: function (ctx) {
+          ctx.get('connection').builtByPlugin = true;
+        }
+      };
+    }
+  });`, sandbox)
+  const regs = vm.runInContext('window.__ModuleLoader__.registrations', sandbox)
+  const conn = regs.find((r) => r.id === '@deepseek-ai/dsh-client-connection')
+  ok(conn !== undefined, 'connection bundle registered through the wrapped live load')
+  const exports = conn.factory((spec) => { throw new Error('no external ' + spec) })
+  exports.apply(stubCtx)
+  ok(handle.isLoopback === true, 'connection apply forces isLoopback open')
+  ok(handle.builtByPlugin === true, 'original connection apply still ran')
+
+  // other bundles must pass through unwrapped (factory identity preserved)
+  vm.runInContext(`window.__ModuleLoader__.load({
+    id: 'dsh-some-other-plugin/client',
+    factory: function () { return {}; }
+  });`, sandbox)
+  const other = vm.runInContext(
+    'window.__ModuleLoader__.registrations.find(function (r) { return r.id === \'dsh-some-other-plugin/client\'; })',
+    sandbox,
+  )
+  ok(other.factory.toString().indexOf('dsh-client-connection') === -1, 'non-connection bundles pass through unwrapped')
 }
 
 // ── 9. stateless sessions: restart survival + token rotation = global logout ──
