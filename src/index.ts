@@ -115,6 +115,12 @@ type Resolved = Required<Omit<Config, 'banner' | 'allowedIps' | 'accessUrls'>> &
 
 const COOKIE_NAME = 'dsh_auth_session'
 
+// PWA installability requires the browser to fetch /manifest.webmanifest from
+// an unauthenticated context (before login). These paths carry zero private
+// data — they are static shell metadata that the upstream serves publicly.
+// 302-ing them to the login page breaks Chromium's installability check.
+const PUBLIC_PATHS = new Set(['/manifest.webmanifest', '/favicon.svg'])
+
 /** Placeholder token from the bundle patch (`env ?? 'change-me'`) — treated as "not configured" everywhere. */
 const TOKEN_PLACEHOLDER = 'change-me'
 
@@ -731,6 +737,14 @@ export function apply(ctx: Context, config?: Config): void {
 
       // IP allowlist bypasses the token entirely.
       if (isAllowedIp(ip, c.allowedIps)) {
+        forward(req, res)
+        return
+      }
+
+      // PWA install metadata & icons are public static shell assets: let
+      // them through without a session so Chromium's installability check
+      // succeeds. (Does not leak anything — upstream serves them publicly.)
+      if (PUBLIC_PATHS.has(pathname)) {
         forward(req, res)
         return
       }
