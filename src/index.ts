@@ -38,6 +38,7 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
@@ -63,6 +64,27 @@ export const inject: string[] = []
  */
 export const AUTH_SETTINGS_NAMESPACE = settingsNamespace('dsh-auth-proxy')
 
+export interface Brand {
+  /** Master switch — when false the whole brand layer is skipped. */
+  enabled?: boolean
+  /**
+   * Tab title brand: replaces "DeepSeek Harness" in the static <title> and in
+   * document.title (setter override). Empty string = no title rewrite.
+   */
+  title?: string
+  /** Sidebar wordmark text rendered next to the brand mark (default "Copilot"). */
+  wordmark?: string
+  /** Inject the Copilot slot-occupant script (sidebar.brand.mark/name + conversation.hero.brand.mark). */
+  logo?: boolean
+  /** Favicon source: inline SVG markup or a host-readable SVG file path. */
+  icon?: {
+    /** Inline SVG markup (uploaded through the settings card). */
+    inline?: string
+    /** Absolute path to an SVG file on the host, read at serve time. */
+    file?: string
+  }
+}
+
 /** Plugin config, validated by the same-named schemastery schema. */
 export interface Config {
   /** Master switch; when false the proxy stops listening. */
@@ -80,10 +102,15 @@ export interface Config {
   /** Optional banner text shown on the login page. */
   banner?: string
   /**
-   * Rebrand the browser tab: replace the product title "DeepSeek Harness" in
-   * document.title with this brand (the client hardcodes that string, so the
-   * proxy injects a document.title-setter override). Empty string disables.
+   * Brand layer: rewrites the forwarded pages' tab title, favicon and PWA
+   * manifest, and optionally injects Copilot brand slot occupants (sidebar
+   * brand mark/name + conversation hero mark). All rewrites run on the proxy
+   * forward path only — direct loopback access (127.0.0.1:3080) never sees
+   * them. The master switch is `brand.enabled`; each sub-feature has its own
+   * flag. Empty object = whole layer off.
    */
+  brand?: Brand
+  /** @deprecated replaced by `brand.title` (mapped automatically). */
   brandTitle?: string
   /** CIDR / IP allowlist bypassing the token (e.g. ["127.0.0.1", "10.0.0.0/8"]). Empty = token always required. */
   allowedIps?: string[]
@@ -106,18 +133,39 @@ export const Config: z<Config> = z.object({
   targetPort: z.natural().max(65535).default(3080),
   token: z.string().role('secret').default(''),
   banner: z.string().default(''),
-  brandTitle: z.string().default('Harness'),
+  brand: z.object({
+    enabled: z.boolean().default(false),
+    title: z.string().default(''),
+    wordmark: z.string().default('Copilot'),
+    logo: z.boolean().default(false),
+    icon: z.object({
+      inline: z.string().default(''),
+      file: z.string().default(''),
+    }),
+  }),
+  /** @deprecated replaced by `brand.title` (mapped automatically). */
+  brandTitle: z.string().default(''),
   allowedIps: z.array(z.string()).default([]),
   accessUrls: z.array(z.string()).default([]),
   maxFailures: z.natural().default(0),
   lockoutMinutes: z.natural().min(1).default(15),
 })
 
+/** Fully-defaulted brand layer (every field materialized). */
+type BrandResolved = {
+  enabled: boolean
+  title: string
+  wordmark: string
+  logo: boolean
+  icon: { inline: string; file: string }
+}
+
 /** Fully-resolved config shape (every field materialized). */
-type Resolved = Required<Omit<Config, 'banner' | 'allowedIps' | 'accessUrls'>> & {
+type Resolved = Required<Omit<Config, 'banner' | 'allowedIps' | 'accessUrls' | 'brand' | 'brandTitle'>> & {
   banner: string
   allowedIps: string[]
   accessUrls: string[]
+  brand: BrandResolved
 }
 
 const COOKIE_NAME = 'dsh_auth_session'
@@ -302,7 +350,7 @@ const UUID_POLYFILL = `<script>
     return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   };
 })();
-<\/script>`
+</script>`
 
 /**
  * Injected into every forwarded HTML response beside the UUID polyfill. dsh
@@ -401,7 +449,7 @@ export const LOOPBACK_COMPAT_SCRIPT = `<script>
     });
   } catch (err) { /* keep the read-only behavior on failure */ }
 })();
-<\/script>`
+</script>`
 
 /**
  * Client script that renames the browser tab to a custom brand. dsh's own
@@ -438,7 +486,162 @@ export function titleBrandScript(brand: string): string {
     });
   } catch (err) { /* keep the default title on failure */ }
 })();
-<\/script>`
+</script>`
+}
+
+/**
+ * Build an SVG data URI usable as a favicon `<link rel="icon" href=...>` or a
+ * PWA-manifest icon src.
+ */
+function svgDataUri(svg: string): string {
+  return 'data:image/svg+xml,' + encodeURIComponent(svg.trim())
+}
+
+/** Fallback brand mark when no icon is configured: the Copilot four-pointed sparkle. */
+const DEFAULT_BRAND_SPARKLE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 18" fill="currentColor"><path d="M12 0.5C14.8 3.2 17.2 6 23.2 9C17.2 12 14.8 14.8 12 17.5C9.2 14.8 6.8 12 0.8 9C6.8 6 9.2 3.2 12 0.5Z"/></svg>`
+
+/** Minimal logger surface used by the icon resolver (kept structural for tests). */
+interface DebugLogger { warn(message: string): void }
+
+/**
+ * Resolve the configured brand icon to its SVG source: inline SVG first, else a
+ * host SVG file read at serve time, else the built-in sparkle. Never throws.
+ */
+function resolveBrandIcon(brand: BrandResolved, logger: DebugLogger): string {
+  const inline = brand.icon.inline.trim()
+  if (inline) return inline
+  const file = brand.icon.file.trim()
+  if (file) {
+    try {
+      return readFileSync(file, 'utf8')
+    } catch (err) {
+      logger.warn(`dsh-auth-proxy: brand icon file unreadable (${file}) — falling back to the sparkle: ${String(err)}`)
+    }
+  }
+  return DEFAULT_BRAND_SPARKLE
+}
+
+/**
+ * Rewrite a forwarded PWA manifest: name/short_name to the brand title and the
+ * icons list to the configured/ default brand SVG. Non-JSON bodies pass through.
+ */
+export function rewriteManifest(body: string, brand: BrandResolved, logger: DebugLogger): string {
+  try {
+    const manifest: Record<string, unknown> = JSON.parse(body)
+    if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) return body
+    if (brand.title) {
+      manifest.name = brand.title
+      manifest.short_name = brand.title.length > 63 ? brand.title.slice(0, 62) : brand.title
+    }
+    if (brand.enabled) {
+      const icon = svgDataUri(resolveBrandIcon(brand, logger))
+      manifest.icons = [
+        { src: icon, sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+        { src: icon, sizes: '512x512', type: 'image/svg+xml', purpose: 'maskable' },
+      ]
+    }
+    return JSON.stringify(manifest)
+  } catch {
+    return body
+  }
+}
+
+/**
+ * Client script (proxy-injected, no new client graph entry) that makes the
+ * Copilot brand the rendered winner in the sidebar and hero. It wraps the graph-
+ * resident `@deepseek-ai/dsh-client-ui-brand-official` bundle (the same
+ * presentational-rewrite technique as {\@link LOOPBACK_COMPAT_SCRIPT}): after
+ * that plugin's apply runs — so its ctx already carries the `slots` service — it
+ * registers our Copilot mark / wordmark / hero occupants at priority -1, which
+ * single slots elect ahead of the official 0. Pure rewrite, proxy-only.
+ * The wordmark is JSON-escaped (every < -> \\u003c) so admin input can never
+ * break out of the string literal or terminate the script tag.
+ */
+export function brandVisualScript(wordmark: string): string {
+  const literal = JSON.stringify(wordmark)
+    .replace(/</g, '\\u003c')
+  return `<script>
+(function () {
+  var BRAND_ID = "@deepseek-ai/dsh-client-ui-brand-official";
+  var WORDMARK = ${literal};
+  var wrapFactory = function (factory) {
+    return function (require) {
+      var mod = factory(require);
+      if (mod && typeof mod.apply === "function") {
+        var originalApply = mod.apply;
+        mod.apply = function (ctx) {
+          var result = originalApply.apply(this, arguments);
+          try {
+            var f = require("react/jsx-runtime");
+            function CopilotSparkle(props) {
+              var size = props && props.size || 24;
+              return f.jsx("svg", {
+                width: size, height: size * 18 / 24, className: props && props.className,
+                viewBox: "0 0 24 18", fill: "none", "aria-hidden": "true",
+                children: f.jsx("path", { d: "M12 0.5C14.8 3.2 17.2 6 23.2 9C17.2 12 14.8 14.8 12 17.5C9.2 14.8 6.8 12 0.8 9C6.8 6 9.2 3.2 12 0.5Z", fill: "currentColor" })
+              });
+            }
+            function CopilotWordmark(props) {
+              return f.jsx("span", {
+                className: props && props.className,
+                style: { fontFamily: "var(--ds-font-family-code, ui-monospace, SFMono-Regular, monospace)", letterSpacing: "0.02em", whiteSpace: "nowrap", userSelect: "none" },
+                children: WORDMARK
+              });
+            }
+            var PRIORITY = -1;
+            if (ctx.slots && typeof ctx.slots.inject === "function") {
+              ctx.slots.inject("sidebar.brand.mark", function () { return ctx.slots.register({ name: "sidebar.brand.mark", priority: PRIORITY }, CopilotSparkle); });
+              ctx.slots.inject("sidebar.brand.name", function () { return ctx.slots.register({ name: "sidebar.brand.name", priority: PRIORITY }, CopilotWordmark); });
+              ctx.slots.inject("conversation.hero.brand.mark", function () { return ctx.slots.register({ name: "conversation.hero.brand.mark", priority: PRIORITY }, CopilotSparkle); });
+            }
+          } catch (err) { /* brand visuals are cosmetic; swallow */ }
+          return result;
+        };
+      }
+      return mod;
+    };
+  };
+  var wrapLoad = function (load) {
+    return function (registration) {
+      if (registration && typeof registration === "object"
+          && registration.id === BRAND_ID
+          && typeof registration.factory === "function") {
+        registration.factory = wrapFactory(registration.factory);
+      }
+      return load.apply(this, arguments);
+    };
+  };
+  var wrapCreate = function (create) {
+    return function (options) {
+      var result = create.call(this, options);
+      if (this && typeof this.load === "function") this.load = wrapLoad(this.load);
+      return result;
+    };
+  };
+  try {
+    var existing = globalThis.__ModuleLoader__;
+    if (existing && typeof existing.load === "function") {
+      existing.load = wrapLoad(existing.load);
+      if (typeof existing.create === "function") existing.create = wrapCreate(existing.create);
+      return;
+    }
+    var realLoader = undefined;
+    var installed = false;
+    Object.defineProperty(globalThis, "__ModuleLoader__", {
+      configurable: true, enumerable: true,
+      get: function () { return realLoader; },
+      set: function (loader) {
+        if (!loader || typeof loader.load !== "function") return;
+        if (installed) { realLoader = loader; return; }
+        installed = true;
+        realLoader = loader;
+        loader.load = wrapLoad(loader.load);
+        if (typeof loader.create === "function") loader.create = wrapCreate(loader.create);
+      }
+    });
+  } catch (err) { /* keep the default brand on failure */ }
+})();
+</script>`
 }
 
 /** Escape user-supplied text before interpolating it into the login page HTML. */
@@ -529,7 +732,13 @@ const DEFAULTS: Resolved = {
   targetPort: 3080,
   token: '',
   banner: '',
-  brandTitle: 'Harness',
+  brand: {
+    enabled: false,
+    title: '',
+    wordmark: 'Copilot',
+    logo: false,
+    icon: { inline: '', file: '' },
+  },
   allowedIps: [],
   accessUrls: [],
   maxFailures: 0,
@@ -554,6 +763,12 @@ export function apply(ctx: Context, config?: Config): void {
   /** Single resolution: the current base source. */
   const resolve: () => Resolved = () => {
     const value = base()
+    // Legacy `brandTitle` (flat) maps onto `brand.title` when the nested brand
+    // layer leaves it empty — old profile patches keep working unchanged.
+    const legacyTitle = (value.brandTitle ?? '').trim()
+    const brandInput = value.brand ?? {}
+    const brandEnabled = brandInput.enabled ?? (legacyTitle !== '' ? true : DEFAULTS.brand.enabled)
+    const brandTitle = brandInput.title ?? (legacyTitle !== '' ? legacyTitle : DEFAULTS.brand.title)
     return {
       enabled: value.enabled ?? DEFAULTS.enabled,
       host: value.host ?? DEFAULTS.host,
@@ -562,7 +777,16 @@ export function apply(ctx: Context, config?: Config): void {
       targetPort: value.targetPort ?? DEFAULTS.targetPort,
       token: value.token ?? DEFAULTS.token,
       banner: value.banner ?? DEFAULTS.banner,
-      brandTitle: value.brandTitle ?? DEFAULTS.brandTitle,
+      brand: {
+        enabled: brandEnabled,
+        title: brandTitle,
+        wordmark: brandInput.wordmark ?? DEFAULTS.brand.wordmark,
+        logo: brandInput.logo ?? DEFAULTS.brand.logo,
+        icon: {
+          inline: brandInput.icon?.inline ?? DEFAULTS.brand.icon.inline,
+          file: brandInput.icon?.file ?? DEFAULTS.brand.icon.file,
+        },
+      },
       allowedIps: value.allowedIps ?? DEFAULTS.allowedIps,
       accessUrls: value.accessUrls ?? DEFAULTS.accessUrls,
       maxFailures: value.maxFailures ?? DEFAULTS.maxFailures,
@@ -738,30 +962,48 @@ export function apply(ctx: Context, config?: Config): void {
           res.destroy()
         })
         const contentType = String(upstream.headers['content-type'] ?? '')
+        const pathname = new URL(req.url ?? '/', 'http://x').pathname
         const isHtml = contentType.toLowerCase().includes('text/html')
-        if (!isHtml) {
+        const isManifest = contentType.toLowerCase().includes('manifest') || /\.(?:web)?manifest$/i.test(pathname)
+        if (!isHtml && !isManifest) {
           res.writeHead(upstream.statusCode ?? 502, upstream.statusMessage, upstream.headers)
           upstream.pipe(res)
           return
         }
-        // Buffer HTML so we can inject the polyfills before </head>.
+        // Buffer HTML (inject polyfills/brand before </head>) and PWA manifests
+        // (rewrite name/icons) so we can edit the body before forwarding.
         const chunks: Buffer[] = []
         upstream.on('data', (c: Buffer) => chunks.push(c))
         upstream.on('end', () => {
           let body = Buffer.concat(chunks).toString('utf8')
-          // Rename the static <title> so the pre-client frame shows the brand
-          // (the upstream may carry any hardcoded product title, e.g.
-          // "DeepSeek Harness" or a brand plugin's "Copilot Harness"); the
-          // injected setter override keeps document.title branded once the React
-          // title projection engages. Empty brand -> no rewrite at all.
-          const brand = live.brandTitle
-          if (brand) {
-            body = body.replace(/<title>([^<]*)<\/title>/i, () => `<title>${htmlEscape(brand)}</title>`)
-          }
-          if (body.includes('</head>')) {
-            const injections = [`${UUID_POLYFILL}\n${LOOPBACK_COMPAT_SCRIPT}`]
-            if (brand) injections.push(titleBrandScript(brand))
-            body = body.replace('</head>', `${injections.join('\n')}\n</head>`)
+          const brand = live.brand
+          if (isManifest) {
+            body = rewriteManifest(body, brand, ctx.logger)
+          } else {
+            // Rename the static <title> so the pre-client frame shows the brand
+            // (the upstream may carry any hardcoded product title, e.g.
+            // "DeepSeek Harness" or a brand plugin's "Copilot Harness"); the
+            // injected setter override keeps document.title branded once the React
+            // title projection engages. Only when brandLogo/unbranded -> no rewrite.
+            if (brand.enabled && brand.title) {
+              body = body.replace(/<title>([^<]*)<\/title>/i, () => `<title>${htmlEscape(brand.title)}</title>`)
+            }
+            if (body.includes('</head>')) {
+              const injections = [`${UUID_POLYFILL}\n${LOOPBACK_COMPAT_SCRIPT}`]
+              if (brand.enabled && brand.title) injections.push(titleBrandScript(brand.title))
+              // Copilot sidebar/hero visual occupants (wraps the official brand graph entry).
+              if (brand.enabled && brand.logo) injections.push(brandVisualScript(brand.wordmark || 'Copilot'))
+              // Favicon: replace the upstream stock icon link with the brand SVG.
+              if (brand.enabled) {
+                const iconHref = svgDataUri(resolveBrandIcon(brand, ctx.logger))
+                if (/<link[^>]*rel=["']?icon["']?[^>]*>/i.test(body)) {
+                  body = body.replace(/<link[^>]*rel=["']?icon["']?[^>]*>/i, `<link rel="icon" type="image/svg+xml" href="${iconHref}" />`)
+                } else {
+                  injections.push(`<link rel="icon" type="image/svg+xml" href="${iconHref}" />`)
+                }
+              }
+              body = body.replace('</head>', `${injections.join('\n')}\n</head>`)
+            }
           }
           const out = Buffer.from(body, 'utf8')
           const headersOut = { ...upstream.headers } as Record<string, string | string[] | number | undefined>

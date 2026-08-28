@@ -22,6 +22,14 @@ export type AuthProxyKey =
   | 'fields.banner'
   | 'fields.brandTitle'
   | 'fields.brandTitleHint'
+  | 'fields.brandEnabled'
+  | 'fields.brandWordmark'
+  | 'fields.brandWordmarkHint'
+  | 'fields.brandLogo'
+  | 'fields.brandIconInline'
+  | 'fields.brandIconHint'
+  | 'fields.brandIconFile'
+  | 'fields.brandIconFileHint'
   | 'fields.allowedIps'
   | 'fields.accessUrls'
   | 'fields.accessUrlsHint'
@@ -55,6 +63,14 @@ export const zh: Record<AuthProxyKey, string> = {
   'fields.banner': '登录页横幅',
   'fields.brandTitle': '标题品牌',
   'fields.brandTitleHint': '替换浏览器标签页中的 “DeepSeek Harness”；留空则不修改标题',
+  'fields.brandEnabled': '启用品牌层（标题/Favicon/PWA）',
+  'fields.brandWordmark': '侧边栏文字（默认 Copilot）',
+  'fields.brandWordmarkHint': '侧边栏左下标记旁的文字',
+  'fields.brandLogo': '启用 Copilot 侧边栏/英雄区视觉',
+  'fields.brandIconInline': '品牌图标内联 SVG',
+  'fields.brandIconHint': '粘贴或上传 SVG 标记文本；留空则用默认星光',
+  'fields.brandIconFile': '品牌图标 SVG 文件路径',
+  'fields.brandIconFileHint': '指向本机可读的 .svg 文件；内联优先',
   'fields.allowedIps': 'IP 白名单（逗号分隔，支持 CIDR）',
   'fields.accessUrls': '访问地址',
   'fields.accessUrlsHint': '通过哪些域名或 URL 访问本代理（多个用逗号分隔），仅用于展示',
@@ -88,7 +104,15 @@ export const en: Record<AuthProxyKey, string> = {
   'fields.tokenHint': 'Leave empty to keep the current token',
   'fields.banner': 'Login page banner',
   'fields.brandTitle': 'Title brand',
-  'fields.brandTitleHint': 'Replaces "DeepSeek Harness" in the browser tab title; leave empty to keep the default',
+  'fields.brandTitleHint': 'Rewrites the browser tab title and PWA manifest name; empty = keep default',
+  'fields.brandEnabled': 'Enable brand layer (title/favicon/PWA)',
+  'fields.brandWordmark': 'Sidebar wordmark (default Copilot)',
+  'fields.brandWordmarkHint': 'Text next to the sidebar brand mark',
+  'fields.brandLogo': 'Enable Copilot sidebar/hero visuals',
+  'fields.brandIconInline': 'Brand icon inline SVG',
+  'fields.brandIconHint': 'Paste or upload SVG markup; empty = default sparkle',
+  'fields.brandIconFile': 'Brand icon SVG file path',
+  'fields.brandIconFileHint': 'Path to a readable .svg on the host; inline takes precedence',
   'fields.allowedIps': 'IP allowlist (comma-separated, CIDR supported)',
   'fields.accessUrls': 'Access URLs',
   'fields.accessUrlsHint': 'Domains or URLs this proxy is reached through (comma-separated, display only)',

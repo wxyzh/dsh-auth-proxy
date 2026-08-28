@@ -18,6 +18,13 @@ export interface AuthProxySection {
   targetHost?: string
   targetPort?: number
   banner?: string
+  brand?: {
+    enabled?: boolean
+    title?: string
+    wordmark?: string
+    logo?: boolean
+    icon?: { inline?: string; file?: string }
+  }
   brandTitle?: string
   allowedIps?: string[]
   accessUrls?: string[]
@@ -87,7 +94,12 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
   const [targetHost, setTargetHost] = useState('127.0.0.1')
   const [targetPort, setTargetPort] = useState('3080')
   const [banner, setBanner] = useState('')
-  const [brandTitle, setBrandTitle] = useState('Harness')
+  const [brandTitle, setBrandTitle] = useState('')
+  const [brandEnabled, setBrandEnabled] = useState(false)
+  const [brandWordmark, setBrandWordmark] = useState('Copilot')
+  const [brandLogo, setBrandLogo] = useState(false)
+  const [brandIconInline, setBrandIconInline] = useState('')
+  const [brandIconFile, setBrandIconFile] = useState('')
   const [allowedIps, setAllowedIps] = useState('')
   const [accessUrls, setAccessUrls] = useState('')
   const [maxFailures, setMaxFailures] = useState('0')
@@ -109,7 +121,12 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
     setTargetHost(value.targetHost ?? '127.0.0.1')
     setTargetPort(String(value.targetPort ?? 3080))
     setBanner(value.banner ?? '')
-    setBrandTitle(value.brandTitle ?? 'Harness')
+    setBrandTitle(value.brand?.title ?? value.brandTitle ?? '')
+    setBrandEnabled(value.brand?.enabled ?? false)
+    setBrandWordmark(value.brand?.wordmark ?? 'Copilot')
+    setBrandLogo(value.brand?.logo ?? false)
+    setBrandIconInline(value.brand?.icon?.inline ?? '')
+    setBrandIconFile(value.brand?.icon?.file ?? '')
     setAllowedIps(toText(value.allowedIps))
     setAccessUrls(toText(value.accessUrls))
     setMaxFailures(String(value.maxFailures ?? 0))
@@ -136,7 +153,12 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
       setTargetHost(value.targetHost ?? '127.0.0.1')
       setTargetPort(String(value.targetPort ?? 3080))
       setBanner(value.banner ?? '')
-      setBrandTitle(value.brandTitle ?? 'Harness')
+      setBrandTitle(value.brand?.title ?? value.brandTitle ?? '')
+      setBrandEnabled(value.brand?.enabled ?? false)
+      setBrandWordmark(value.brand?.wordmark ?? 'Copilot')
+      setBrandLogo(value.brand?.logo ?? false)
+      setBrandIconInline(value.brand?.icon?.inline ?? '')
+      setBrandIconFile(value.brand?.icon?.file ?? '')
       setAllowedIps(toText(value.allowedIps))
       setAccessUrls(toText(value.accessUrls))
       setMaxFailures(String(value.maxFailures ?? 0))
@@ -165,7 +187,13 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
       await scope.set('targetHost', targetHost)
       await scope.set('targetPort', Number(targetPort))
       await scope.set('banner', banner)
-      await scope.set('brandTitle', brandTitle.trim())
+      await scope.set('brand', {
+        enabled: brandEnabled,
+        title: brandTitle.trim(),
+        wordmark: brandWordmark.trim(),
+        logo: brandLogo,
+        icon: { inline: brandIconInline.trim(), file: brandIconFile.trim() },
+      })
       await scope.set('allowedIps', fromText(allowedIps))
       await scope.set('accessUrls', fromText(accessUrls))
       await scope.set('maxFailures', Number(maxFailures))

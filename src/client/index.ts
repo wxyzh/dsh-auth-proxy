@@ -26,6 +26,7 @@ const NS = 'auth-proxy'
  * namespace (mirrors the Host Config schema; the token is a write-only secret
  * and is never seeded from a response).
  */
+/** @deprecated replaced by `brand.title` (mapped automatically). */
 export interface AuthProxySection {
   enabled?: boolean
   host?: string
@@ -33,6 +34,13 @@ export interface AuthProxySection {
   targetHost?: string
   targetPort?: number
   banner?: string
+  brand?: {
+    enabled?: boolean
+    title?: string
+    wordmark?: string
+    logo?: boolean
+    icon?: { inline?: string; file?: string }
+  }
   brandTitle?: string
   allowedIps?: string[]
   accessUrls?: string[]

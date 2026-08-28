@@ -31,6 +31,10 @@ browser ──► auth proxy :8443 (127.0.0.1) ──► dsh webserver 127.0.0.1
 - 状态可视：宿主终端直接打印 `dsh-auth-proxy: listening on http://<host>:<port>`（console.log 镜像，
   dsh web 不把插件 `ctx.logger` 打到终端），设置卡片同样显示实际监听地址；通过 `accessUrls` 声明的
   入口地址（可含 HTTPS 域名）会展示在卡片与登录页，多域名场景一眼可知该用哪个 URL。
+- **品牌层（proxy 前置重写）**：`brand.enabled` 开启后，转发页改标题（含 `document.title` 拦截）、
+  换 favicon（内联 SVG 或本机 SVG 文件）、改写 PWA manifest（name/short_name/icons）、可选注入
+  Copilot 侧边栏/英雄区视觉（`brand.logo`，包裹官方 brand 图像 —— 无需新增 client 包）。所有重写都
+  发生在代理 forward 路径，**内网直连 127.0.0.1:3080 完全不受影响**；关闭开关则零干预。
 - **无 TLS，禁绑通配/公网**：监听地址仅允许回环与内网（默认 `127.0.0.1`）；`0.0.0.0`、`::` 与公网 IP
   在保存与启动时都会被拒绝。外部访问请在前面挂 TLS 反向代理，回指本监听地址。
 
@@ -77,7 +81,13 @@ dsh plugin --profile web remove @wxyzh/dsh-auth-proxy
 | `targetHost` | `127.0.0.1` | 回环转发目标 |
 | `targetPort` | `3080` | 回环转发端口 |
 | `token` | 见下 | 共享访问令牌 |
-| `brandTitle` | `'Harness'` | 转发页签标题品牌：把前端硬编码的 `document.title` 里的 `DeepSeek Harness` 替换为该值（静态 `<title>` 亦整体换成该值，空串则完全不改写/不注入，还原原生标题） |
+| `brandTitle` | `'Harness'`（已弃用，映射到 `brand.title`） | 转发页签标题品牌（旧字段；新配置见下 `brand.*`） |
+| `brand.enabled` | `false` | **品牌层总开关**：开启后才做标题/favicon/PWA/侧边栏视觉的 proxy-前置重写；内网直连 3080 不受影响 |
+| `brand.title` | `''` | 转发页签标题 + PWA `name`/`short_name`：替换硬编码的 `DeepSeek Harness`（静态 `<title>` 也整体换成该值；空串不改） |
+| `brand.wordmark` | `'Copilot'` | 侧边栏标记旁的文字 |
+| `brand.logo` | `false` | 注入 Copilot 侧边栏/英雄区视觉（包裹官方 brand 图像开口，无需新增 client 包） |
+| `brand.icon.inline` | `''` | 品牌图标内联 SVG（favicon + PWA icons）；空＝默认星光 |
+| `brand.icon.file` | `''` | 品牌图标本机 SVG 文件路径（serve 时读取；内联优先） |
 | `banner` | `''` | 登录页横幅文案 |
 | `allowedIps` | `[]` | IP 白名单（如 `["127.0.0.1", "10.0.0.0/8"]`），空 = 一律要令牌 |
 | `accessUrls` | `[]` | 对外访问地址（可含 HTTPS 域名，多域名逗号分隔），仅用于展示 |

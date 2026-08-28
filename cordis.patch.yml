@@ -16,6 +16,14 @@
 # All values below are also editable live in the Web UI under
 # Settings > Plugin config > dsh-auth-proxy (dsh-settings service).
 #
+# Brand layer (brand.*): a pure proxy-forward rewrite — the loopback webserver
+# itself is never touched, so internal LAN access to 127.0.0.1:3080 keeps the
+# stock DSH look. Master switch `brand.enabled`; sub-toggles `brand.title`
+# (tab title + PWA name/short_name), `brand.logo` (Copilot sidebar/hero slots
+# via the official brand graph entry), and `brand.icon` (favicon + PWA icons;
+# inline SVG or a host SVG file, empty = default sparkle). The legacy flat
+# `brandTitle` still maps onto brand.title when brand.title is empty.
+#
 # SECURITY: set the token via environment reference, not a literal:
 #   token: !!js process.env.DSH_AUTH_TOKEN
 # Until a real token is configured (empty or the placeholder 'change-me'),
@@ -29,7 +37,14 @@
         port: 8443
         targetHost: '127.0.0.1'
         targetPort: 3080
-        brandTitle: 'Harness'
+        brand:
+          enabled: false
+          title: 'Harness'
+          wordmark: 'Copilot'
+          logo: false
+          icon:
+            inline: ''
+            file: ''
         token: !!js process.env.DSH_AUTH_TOKEN ?? 'change-me'
         banner: ''
         allowedIps: []

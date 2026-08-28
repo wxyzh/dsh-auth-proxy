@@ -23,7 +23,7 @@
  */
 import { createServer as httpCreateServer, request as httpRequest } from 'node:http'
 import vm from 'node:vm'
-import { apply, AUTH_SETTINGS_NAMESPACE, LOOPBACK_COMPAT_SCRIPT, titleBrandScript } from '../lib/types/index.js'
+import { apply, AUTH_SETTINGS_NAMESPACE, LOOPBACK_COMPAT_SCRIPT, titleBrandScript, brandVisualScript, rewriteManifest } from '../lib/types/index.js'
 
 let passed = 0
 let failed = 0
@@ -327,9 +327,7 @@ for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'ch
 
 // ── 8a. title rebrand: static title rewritten + document.title setter override ──
 {
-  console.log('scenario: title rebrand (static title + document.title setter override)')
-
-  // Unit: run the generated script in a minimal fake DOM. The script preserves
+  console.log('scenario: title rebrand (static title + document.title setter override)')  // Unit: run the generated script in a minimal fake DOM. The script preserves
   // the original Document.prototype.title descriptor and re-declares
   // document.title so every write splits out "DeepSeek Harness".
   const runTitleScript = (brand) => {
@@ -375,7 +373,7 @@ for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'ch
     upstream.listen(0, '127.0.0.1', () => resolve(upstream.address().port))
   })
   const p = await freePort()
-  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p, targetPort: up, token: 's3cret', brandTitle: 'Harness' })
+  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p, targetPort: up, token: 's3cret', brand: { enabled: true, title: 'Harness' } })
   const good = await httpPost(p, '/__dsh_auth/login', 'token=s3cret')
   const cookie = good.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
   const page = await httpGet(p, '/', { cookie })
@@ -386,7 +384,7 @@ for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'ch
 
   // Empty brand -> untouched (no rewrite at all).
   const p0 = await freePort()
-  const s0 = await scenario({ enabled: true, host: '127.0.0.1', port: p0, targetPort: up, token: 's3cret', brandTitle: '' })
+  const s0 = await scenario({ enabled: true, host: '127.0.0.1', port: p0, targetPort: up, token: 's3cret', brand: { enabled: false } })
   const good0 = await httpPost(p0, '/__dsh_auth/login', 'token=s3cret')
   const cookie0 = good0.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
   const page0 = await httpGet(p0, '/', { cookie: cookie0 })
@@ -394,6 +392,87 @@ for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'ch
   ok(page0.body.indexOf('var brand =') === -1, 'empty brand injects no setter-override script')
   s.closeAll()
   s0.closeAll()
+  await new Promise((r) => upstream.close(r))
+}
+
+// ── 8c. brand layer: favicon, PWA manifest, Copilot visuals, master toggle ──
+{
+  console.log('scenario: brand layer (favicon + manifest + Copilot visuals + toggle)')
+
+  // Legacy flat brandTitle still maps onto brand.title (deprecated alias).
+  const upstream = httpCreateServer((req, res) => {
+    if (req.url === '/manifest.webmanifest') {
+      res.writeHead(200, { 'content-type': 'application/manifest+json; charset=utf-8' })
+      res.end(JSON.stringify({ name: 'DeepSeek Harness', short_name: 'DSH', start_url: '/', icons: [{ src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml' }] }))
+      return
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end('<!doctype html><html><head><link rel="manifest" href="/manifest.webmanifest" /><link rel="icon" type="image/svg+xml" href="/favicon.svg" /><title>DeepSeek Harness</title></head><body>ok</body></html>')
+  })
+  const up = await new Promise((resolve, reject) => {
+    upstream.on('error', reject)
+    upstream.listen(0, '127.0.0.1', () => resolve(upstream.address().port))
+  })
+
+  const p = await freePort()
+  const s = await scenario({
+    enabled: true, host: '127.0.0.1', port: p, targetPort: up, token: 's3cret',
+    brand: { enabled: true, title: 'Copilot Harness', wordmark: 'Copilot', logo: true },
+  })
+  const good = await httpPost(p, '/__dsh_auth/login', 'token=s3cret')
+  const cookie = good.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
+  const page = await httpGet(p, '/', { cookie })
+
+  ok(page.body.includes('<title>Copilot Harness</title>'), 'static title rewritten to brand.title')
+  ok(page.body.includes('var brand = \"Copilot Harness\"'), 'document.title setter override present')
+  const iconLink = page.body.match(/<link rel=\"icon\"[^>]*href=\"([^\"]+)\"/)
+  ok(iconLink !== null && iconLink[1].startsWith('data:image/svg+xml'), 'favicon link rewritten to an SVG data URI')
+  // Copilot visuals: injected wrap script targets the official brand graph entry.
+  ok(page.body.includes('@deepseek-ai/dsh-client-ui-brand-official'), 'brand visual script wraps the official brand bundle')
+  ok(page.body.includes('sidebar.brand.mark') && page.body.includes('conversation.hero.brand.mark'), 'brand visual script registers the three slots')
+
+  // Manifest response is rewritten: name/short_name + icons point at the brand SVG.
+  const man = await httpGet(p, '/manifest.webmanifest', { cookie })
+  const manifest = JSON.parse(man.body)
+  ok(manifest.name === 'Copilot Harness', 'manifest name rewritten to brand.title')
+  ok(manifest.icons.every((i) => i.src.startsWith('data:image/svg+xml')), 'manifest icons replaced by the brand SVG')
+
+  // Master toggle off -> no brand rewriting at all.
+  const p2 = await freePort()
+  const s2 = await scenario({ enabled: true, host: '127.0.0.1', port: p2, targetPort: up, token: 's3cret', brand: { enabled: false } })
+  const good2 = await httpPost(p2, '/__dsh_auth/login', 'token=s3cret')
+  const cookie2 = good2.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
+  const page2 = await httpGet(p2, '/', { cookie: cookie2 })
+  ok(page2.body.includes('<title>DeepSeek Harness</title>'), 'toggle off keeps the stock title')
+  ok(!page2.body.includes('dsh-client-ui-brand-official'), 'toggle off injects no brand visual script')
+  ok(!/data:image\/svg\+xml/.test(page2.body), 'toggle off injects no favicon')
+  const man2raw = await httpGet(p2, '/manifest.webmanifest', { cookie: cookie2 })
+  const man2 = JSON.parse(man2raw.body)
+  ok(man2.name === 'DeepSeek Harness' && man2.icons[0].src === '/favicon.svg', 'toggle off leaves the manifest untouched')
+
+  // Custom inline favicon + legacy brandTitle alias both apply.
+  const p3 = await freePort()
+  const s3 = await scenario({
+    enabled: true, host: '127.0.0.1', port: p3, targetPort: up, token: 's3cret',
+    brand: { enabled: true, icon: { inline: '<svg><path id=\"stroop\" d=\"M0 0\"/></svg>' } },
+  })
+  const good3 = await httpPost(p3, '/__dsh_auth/login', 'token=s3cret')
+  const cookie3 = good3.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
+  const page3 = await httpGet(p3, '/', { cookie: cookie3 })
+  const icon3 = page3.body.match(/<link rel=\"icon\"[^>]*href=\"data:image\/svg\+xml,([^\"]+)\"/)
+  ok(icon3 !== null && decodeURIComponent(icon3[1]).includes('stroop'), 'custom inline SVG favicon used verbatim')
+
+  const evil = '</script><script>alert(1)</script>'
+  const vis = brandVisualScript(evil)
+  ok(vis.indexOf('\\u003c/script>\\u003cscript>alert(1)\\u003c/script>') !== -1, 'dangerous wordmark emitted as JS/HTML-safe \\u003c literal')
+  ok(vis.indexOf('/script><script>alert') === -1, 'no embedded closing script tag survives in a dangerous wordmark')
+
+  // rewriteManifest unit: non-JSON passes through untouched.
+  ok(rewriteManifest('not json', { enabled: true, title: 'X', wordmark: 'C', logo: false, icon: { inline: '', file: '' } }, { warn: () => {} }) === 'not json', 'non-JSON manifest body passes through')
+
+  s.closeAll()
+  s2.closeAll()
+  s3.closeAll()
   await new Promise((r) => upstream.close(r))
 }
 
