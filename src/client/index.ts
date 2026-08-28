@@ -33,6 +33,7 @@ export interface AuthProxySection {
   targetHost?: string
   targetPort?: number
   banner?: string
+  brandTitle?: string
   allowedIps?: string[]
   accessUrls?: string[]
   maxFailures?: number

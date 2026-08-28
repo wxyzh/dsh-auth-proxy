@@ -20,6 +20,8 @@ export type AuthProxyKey =
   | 'fields.token'
   | 'fields.tokenHint'
   | 'fields.banner'
+  | 'fields.brandTitle'
+  | 'fields.brandTitleHint'
   | 'fields.allowedIps'
   | 'fields.accessUrls'
   | 'fields.accessUrlsHint'
@@ -51,6 +53,8 @@ export const zh: Record<AuthProxyKey, string> = {
   'fields.token': '访问令牌',
   'fields.tokenHint': '留空保持当前令牌不变',
   'fields.banner': '登录页横幅',
+  'fields.brandTitle': '标题品牌',
+  'fields.brandTitleHint': '替换浏览器标签页中的 “DeepSeek Harness”；留空则不修改标题',
   'fields.allowedIps': 'IP 白名单（逗号分隔，支持 CIDR）',
   'fields.accessUrls': '访问地址',
   'fields.accessUrlsHint': '通过哪些域名或 URL 访问本代理（多个用逗号分隔），仅用于展示',
@@ -83,6 +87,8 @@ export const en: Record<AuthProxyKey, string> = {
   'fields.token': 'Access token',
   'fields.tokenHint': 'Leave empty to keep the current token',
   'fields.banner': 'Login page banner',
+  'fields.brandTitle': 'Title brand',
+  'fields.brandTitleHint': 'Replaces "DeepSeek Harness" in the browser tab title; leave empty to keep the default',
   'fields.allowedIps': 'IP allowlist (comma-separated, CIDR supported)',
   'fields.accessUrls': 'Access URLs',
   'fields.accessUrlsHint': 'Domains or URLs this proxy is reached through (comma-separated, display only)',

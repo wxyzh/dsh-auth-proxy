@@ -18,6 +18,7 @@ export interface AuthProxySection {
   targetHost?: string
   targetPort?: number
   banner?: string
+  brandTitle?: string
   allowedIps?: string[]
   accessUrls?: string[]
   maxFailures?: number
@@ -86,6 +87,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
   const [targetHost, setTargetHost] = useState('127.0.0.1')
   const [targetPort, setTargetPort] = useState('3080')
   const [banner, setBanner] = useState('')
+  const [brandTitle, setBrandTitle] = useState('Harness')
   const [allowedIps, setAllowedIps] = useState('')
   const [accessUrls, setAccessUrls] = useState('')
   const [maxFailures, setMaxFailures] = useState('0')
@@ -107,6 +109,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
     setTargetHost(value.targetHost ?? '127.0.0.1')
     setTargetPort(String(value.targetPort ?? 3080))
     setBanner(value.banner ?? '')
+    setBrandTitle(value.brandTitle ?? 'Harness')
     setAllowedIps(toText(value.allowedIps))
     setAccessUrls(toText(value.accessUrls))
     setMaxFailures(String(value.maxFailures ?? 0))
@@ -133,6 +136,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
       setTargetHost(value.targetHost ?? '127.0.0.1')
       setTargetPort(String(value.targetPort ?? 3080))
       setBanner(value.banner ?? '')
+      setBrandTitle(value.brandTitle ?? 'Harness')
       setAllowedIps(toText(value.allowedIps))
       setAccessUrls(toText(value.accessUrls))
       setMaxFailures(String(value.maxFailures ?? 0))
@@ -161,6 +165,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
       await scope.set('targetHost', targetHost)
       await scope.set('targetPort', Number(targetPort))
       await scope.set('banner', banner)
+      await scope.set('brandTitle', brandTitle.trim())
       await scope.set('allowedIps', fromText(allowedIps))
       await scope.set('accessUrls', fromText(accessUrls))
       await scope.set('maxFailures', Number(maxFailures))
@@ -176,7 +181,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
     } finally {
       setSaving(false)
     }
-  }, [tokenDraft, enabled, host, port, targetHost, targetPort, banner, allowedIps, accessUrls, maxFailures, lockoutMinutes, scope])
+  }, [tokenDraft, enabled, host, port, targetHost, targetPort, banner, brandTitle, allowedIps, accessUrls, maxFailures, lockoutMinutes, scope])
 
   const downloading = !available
 
@@ -238,6 +243,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
       />
       <Field label={t('fields.allowedIps')} value={allowedIps} onChange={(v) => { setAllowedIps(v); mark() }} />
       <Field label={t('fields.banner')} value={banner} onChange={(v) => { setBanner(v); mark() }} />
+      <Field label={t('fields.brandTitle')} value={brandTitle} onChange={(v) => { setBrandTitle(v); mark() }} hint={t('fields.brandTitleHint')} />
       <Field label={t('fields.accessUrls')} value={accessUrls} onChange={(v) => { setAccessUrls(v); mark() }} hint={t('fields.accessUrlsHint')} />
 
       {failed ? <p style={styles.error}>{error ?? t('settings.saveFailed')}</p> : null}

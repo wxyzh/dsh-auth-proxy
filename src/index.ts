@@ -79,6 +79,12 @@ export interface Config {
   token: string
   /** Optional banner text shown on the login page. */
   banner?: string
+  /**
+   * Rebrand the browser tab: replace the product title "DeepSeek Harness" in
+   * document.title with this brand (the client hardcodes that string, so the
+   * proxy injects a document.title-setter override). Empty string disables.
+   */
+  brandTitle?: string
   /** CIDR / IP allowlist bypassing the token (e.g. ["127.0.0.1", "10.0.0.0/8"]). Empty = token always required. */
   allowedIps?: string[]
   /**
@@ -100,6 +106,7 @@ export const Config: z<Config> = z.object({
   targetPort: z.natural().max(65535).default(3080),
   token: z.string().role('secret').default(''),
   banner: z.string().default(''),
+  brandTitle: z.string().default('Harness'),
   allowedIps: z.array(z.string()).default([]),
   accessUrls: z.array(z.string()).default([]),
   maxFailures: z.natural().default(0),
@@ -114,12 +121,6 @@ type Resolved = Required<Omit<Config, 'banner' | 'allowedIps' | 'accessUrls'>> &
 }
 
 const COOKIE_NAME = 'dsh_auth_session'
-
-// PWA installability requires the browser to fetch /manifest.webmanifest from
-// an unauthenticated context (before login). These paths carry zero private
-// data — they are static shell metadata that the upstream serves publicly.
-// 302-ing them to the login page breaks Chromium's installability check.
-const PUBLIC_PATHS = new Set(['/manifest.webmanifest', '/favicon.svg'])
 
 /** Placeholder token from the bundle patch (`env ?? 'change-me'`) — treated as "not configured" everywhere. */
 const TOKEN_PLACEHOLDER = 'change-me'
@@ -402,6 +403,44 @@ export const LOOPBACK_COMPAT_SCRIPT = `<script>
 })();
 <\/script>`
 
+/**
+ * Client script that renames the browser tab to a custom brand. dsh's own
+ * DocumentTitle projection (dsh-client-ui-renderer) writes the product title
+ * ("DeepSeek Harness") into document.title — bare, and as the
+ * "<session> — DeepSeek Harness" suffix — with the string hardcoded in its
+ * client bundle. Rewriting only the static <title> in index.html is therefore
+ * immediately overwritten by the client; intercepting the document.title
+ * setter replaces every occurrence in one hook, covering the no-session,
+ * session-suffix and restore paths alike.
+ *
+ * The brand is JSON-escaped (every `<` turned into \u003c) so arbitrary admin
+ * input can never escape the string literal or terminate the script tag.
+ * @param brand - the replacement brand; must already be non-empty.
+ */
+export function titleBrandScript(brand: string): string {
+  const literal = JSON.stringify(brand)
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029')
+    .replace(/</g, '\\u003c')
+  return `<script>
+(function () {
+  var brand = ${literal};
+  if (!brand) return;
+  if (typeof Document !== 'function') return;
+  try {
+    var desc = Object.getOwnPropertyDescriptor(Document.prototype, 'title');
+    if (!desc || typeof desc.set !== 'function') return;
+    Object.defineProperty(document, 'title', {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get: function () { return desc.get.call(document); },
+      set: function (value) { desc.set.call(document, String(value).split('DeepSeek Harness').join(brand)); }
+    });
+  } catch (err) { /* keep the default title on failure */ }
+})();
+<\/script>`
+}
+
 /** Escape user-supplied text before interpolating it into the login page HTML. */
 function htmlEscape(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -490,6 +529,7 @@ const DEFAULTS: Resolved = {
   targetPort: 3080,
   token: '',
   banner: '',
+  brandTitle: 'Harness',
   allowedIps: [],
   accessUrls: [],
   maxFailures: 0,
@@ -522,6 +562,7 @@ export function apply(ctx: Context, config?: Config): void {
       targetPort: value.targetPort ?? DEFAULTS.targetPort,
       token: value.token ?? DEFAULTS.token,
       banner: value.banner ?? DEFAULTS.banner,
+      brandTitle: value.brandTitle ?? DEFAULTS.brandTitle,
       allowedIps: value.allowedIps ?? DEFAULTS.allowedIps,
       accessUrls: value.accessUrls ?? DEFAULTS.accessUrls,
       maxFailures: value.maxFailures ?? DEFAULTS.maxFailures,
@@ -708,8 +749,17 @@ export function apply(ctx: Context, config?: Config): void {
         upstream.on('data', (c: Buffer) => chunks.push(c))
         upstream.on('end', () => {
           let body = Buffer.concat(chunks).toString('utf8')
+          // Rename the static <title> (<title>DeepSeek Harness</title>) so the
+          // pre-client frame shows the brand; the injected setter override keeps it
+          // that way once the React title projection engages.
+          const brand = live.brandTitle
+          if (brand && body.includes('<title>DeepSeek Harness</title>')) {
+            body = body.replace('<title>DeepSeek Harness</title>', `<title>${htmlEscape(brand)}</title>`)
+          }
           if (body.includes('</head>')) {
-            body = body.replace('</head>', `${UUID_POLYFILL}\n${LOOPBACK_COMPAT_SCRIPT}\n</head>`)
+            const injections = [`${UUID_POLYFILL}\n${LOOPBACK_COMPAT_SCRIPT}`]
+            if (brand) injections.push(titleBrandScript(brand))
+            body = body.replace('</head>', `${injections.join('\n')}\n</head>`)
           }
           const out = Buffer.from(body, 'utf8')
           const headersOut = { ...upstream.headers } as Record<string, string | string[] | number | undefined>
@@ -737,14 +787,6 @@ export function apply(ctx: Context, config?: Config): void {
 
       // IP allowlist bypasses the token entirely.
       if (isAllowedIp(ip, c.allowedIps)) {
-        forward(req, res)
-        return
-      }
-
-      // PWA install metadata & icons are public static shell assets: let
-      // them through without a session so Chromium's installability check
-      // succeeds. (Does not leak anything — upstream serves them publicly.)
-      if (PUBLIC_PATHS.has(pathname)) {
         forward(req, res)
         return
       }

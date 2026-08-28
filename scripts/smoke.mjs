@@ -23,7 +23,7 @@
  */
 import { createServer as httpCreateServer, request as httpRequest } from 'node:http'
 import vm from 'node:vm'
-import { apply, AUTH_SETTINGS_NAMESPACE, LOOPBACK_COMPAT_SCRIPT } from '../lib/types/index.js'
+import { apply, AUTH_SETTINGS_NAMESPACE, LOOPBACK_COMPAT_SCRIPT, titleBrandScript } from '../lib/types/index.js'
 
 let passed = 0
 let failed = 0
@@ -322,6 +322,75 @@ for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'ch
   ok(page.body.includes('crypto.randomUUID') && page.body.includes('dsh-client-connection'), 'HTML carries the UUID polyfill and the loopback-compat shim')
   ok(page.body.includes('isLoopback') && page.body.includes('__ModuleLoader__'), 'compat shim targets the client connection loopback flag')
   s.closeAll()
+  await new Promise((r) => upstream.close(r))
+}
+
+// ── 8a. title rebrand: static title rewritten + document.title setter override ──
+{
+  console.log('scenario: title rebrand (static title + document.title setter override)')
+
+  // Unit: run the generated script in a minimal fake DOM. The script preserves
+  // the original Document.prototype.title descriptor and re-declares
+  // document.title so every write splits out "DeepSeek Harness".
+  const runTitleScript = (brand) => {
+    const body = titleBrandScript(brand).replace(/^<script>\n?\s*/, '').replace(/\n?\s*<\/script>$/, '')
+    const sandbox = { Document: function Document() {}, document: {} }
+    vm.createContext(sandbox)
+    Object.defineProperty(sandbox.Document.prototype, 'title', {
+      configurable: true,
+      enumerable: true,
+      get: function () { return this.__t },
+      set: function (v) { this.__t = v },
+    })
+    vm.runInContext('document.__t = "DeepSeek Harness";', sandbox)
+    vm.runInContext(body, sandbox)
+    return sandbox
+  }
+
+  const sb = runTitleScript('Harness')
+  sb.document.title = 'My Chat — DeepSeek Harness'
+  ok(sb.document.title === 'My Chat — Harness', 'setter replaces the "session — product" suffix')
+  sb.document.title = 'DeepSeek Harness'
+  ok(sb.document.title === 'Harness', 'setter replaces the bare product title')
+
+  // A dangerous brand must be emitted as a safe literal and survive intact.
+  const evil = '</script><script>alert(1)</script>'
+  const esc = titleBrandScript(evil)
+  const escBody = esc.replace(/^<script>\n?\s*/, '').replace(/\n?\s*<\/script>$/, '')
+  ok(escBody.includes('\\u003c/script>\\u003cscript>alert(1)\\u003c/script>'), 'dangerous brand emitted as JS/HTML-safe \\u003c literal')
+  ok(escBody.indexOf('</script><script>alert') === -1, 'no embedded closing script tag survives in a dangerous brand')
+  const sbE = runTitleScript(evil)
+  sbE.document.title = 'X — DeepSeek Harness'
+  ok(sbE.document.title === `X — ${evil}`, 'escaped brand literal round-trips intact (no breakout)')
+
+  // Integration: forwarded upstream HTML (<title>DeepSeek Harness</title>)
+  // comes back renamed and carrying the setter-override script.
+  const upstream = httpCreateServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end('<!doctype html><html><head><title>DeepSeek Harness</title></head><body>ok</body></html>')
+  })
+  const up = await new Promise((resolve, reject) => {
+    upstream.on('error', reject)
+    upstream.listen(0, '127.0.0.1', () => resolve(upstream.address().port))
+  })
+  const p = await freePort()
+  const s = await scenario({ enabled: true, host: '127.0.0.1', port: p, targetPort: up, token: 's3cret', brandTitle: 'Harness' })
+  const good = await httpPost(p, '/__dsh_auth/login', 'token=s3cret')
+  const cookie = good.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
+  const page = await httpGet(p, '/', { cookie })
+  ok(page.body.includes('<title>Harness</title>'), 'static <title> rewritten to the brand')
+  ok(page.body.includes('var brand = "Harness"') && page.body.includes("getOwnPropertyDescriptor(Document.prototype"), 'setter-override script present in the forwarded HTML')
+
+  // Empty brand -> untouched (no rewrite at all).
+  const p0 = await freePort()
+  const s0 = await scenario({ enabled: true, host: '127.0.0.1', port: p0, targetPort: up, token: 's3cret', brandTitle: '' })
+  const good0 = await httpPost(p0, '/__dsh_auth/login', 'token=s3cret')
+  const cookie0 = good0.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
+  const page0 = await httpGet(p0, '/', { cookie: cookie0 })
+  ok(page0.body.includes('<title>DeepSeek Harness</title>'), 'empty brand leaves the static title untouched')
+  ok(page0.body.indexOf('var brand =') === -1, 'empty brand injects no setter-override script')
+  s.closeAll()
+  s0.closeAll()
   await new Promise((r) => upstream.close(r))
 }
 
