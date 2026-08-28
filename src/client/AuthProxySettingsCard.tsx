@@ -17,6 +17,7 @@ export interface AuthProxySection {
   port?: number
   targetHost?: string
   targetPort?: number
+  brandTitle?: string
   banner?: string
   allowedIps?: string[]
   accessUrls?: string[]
@@ -85,6 +86,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
   const [port, setPort] = useState('8443')
   const [targetHost, setTargetHost] = useState('127.0.0.1')
   const [targetPort, setTargetPort] = useState('3080')
+  const [brandTitle, setBrandTitle] = useState('')
   const [banner, setBanner] = useState('')
   const [allowedIps, setAllowedIps] = useState('')
   const [accessUrls, setAccessUrls] = useState('')
@@ -106,6 +108,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
     setPort(String(value.port ?? 8443))
     setTargetHost(value.targetHost ?? '127.0.0.1')
     setTargetPort(String(value.targetPort ?? 3080))
+    setBrandTitle(value.brandTitle ?? '')
     setBanner(value.banner ?? '')
     setAllowedIps(toText(value.allowedIps))
     setAccessUrls(toText(value.accessUrls))
@@ -132,6 +135,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
       setPort(String(value.port ?? 8443))
       setTargetHost(value.targetHost ?? '127.0.0.1')
       setTargetPort(String(value.targetPort ?? 3080))
+      setBrandTitle(value.brandTitle ?? '')
       setBanner(value.banner ?? '')
       setAllowedIps(toText(value.allowedIps))
       setAccessUrls(toText(value.accessUrls))
@@ -160,6 +164,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
       await scope.set('port', Number(port))
       await scope.set('targetHost', targetHost)
       await scope.set('targetPort', Number(targetPort))
+      await scope.set('brandTitle', brandTitle)
       await scope.set('banner', banner)
       await scope.set('allowedIps', fromText(allowedIps))
       await scope.set('accessUrls', fromText(accessUrls))
@@ -176,7 +181,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
     } finally {
       setSaving(false)
     }
-  }, [tokenDraft, enabled, host, port, targetHost, targetPort, banner, allowedIps, accessUrls, maxFailures, lockoutMinutes, scope])
+  }, [tokenDraft, enabled, host, port, targetHost, targetPort, brandTitle, banner, allowedIps, accessUrls, maxFailures, lockoutMinutes, scope])
 
   const downloading = !available
 
@@ -237,6 +242,7 @@ export function AuthProxySettingsCard({ t, scope, getSnapshot, close }: AuthProx
         type="password"
       />
       <Field label={t('fields.allowedIps')} value={allowedIps} onChange={(v) => { setAllowedIps(v); mark() }} />
+      <Field label={t('fields.brandTitle')} value={brandTitle} onChange={(v) => { setBrandTitle(v); mark() }} />
       <Field label={t('fields.banner')} value={banner} onChange={(v) => { setBanner(v); mark() }} />
       <Field label={t('fields.accessUrls')} value={accessUrls} onChange={(v) => { setAccessUrls(v); mark() }} hint={t('fields.accessUrlsHint')} />
 

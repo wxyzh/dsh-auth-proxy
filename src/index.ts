@@ -77,6 +77,8 @@ export interface Config {
   targetPort?: number
   /** The shared access token. Prefer an env reference: `!!js process.env.DSH_AUTH_TOKEN`. */
   token: string
+  /** Brand / title shown on the login page (<title> and heading). Empty falls back to the built-in default. */
+  brandTitle?: string
   /** Optional banner text shown on the login page. */
   banner?: string
   /** CIDR / IP allowlist bypassing the token (e.g. ["127.0.0.1", "10.0.0.0/8"]). Empty = token always required. */
@@ -99,6 +101,7 @@ export const Config: z<Config> = z.object({
   targetHost: z.string().default('127.0.0.1'),
   targetPort: z.natural().max(65535).default(3080),
   token: z.string().role('secret').default(''),
+  brandTitle: z.string().default(''),
   banner: z.string().default(''),
   allowedIps: z.array(z.string()).default([]),
   accessUrls: z.array(z.string()).default([]),
@@ -107,7 +110,8 @@ export const Config: z<Config> = z.object({
 })
 
 /** Fully-resolved config shape (every field materialized). */
-type Resolved = Required<Omit<Config, 'banner' | 'allowedIps' | 'accessUrls'>> & {
+type Resolved = Required<Omit<Config, 'brandTitle' | 'banner' | 'allowedIps' | 'accessUrls'>> & {
+  brandTitle: string
   banner: string
   allowedIps: string[]
   accessUrls: string[]
@@ -407,12 +411,12 @@ function htmlEscape(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
-const LOGIN_PAGE = (banner: string, locked = false, accessUrls: string[] = []): string => `<!doctype html>
+const LOGIN_PAGE = (brandTitle: string, banner: string, locked = false, accessUrls: string[] = []): string => `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DSH 访问鉴权</title>
+<title>${htmlEscape(brandTitle || 'DSH 访问鉴权')}</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -446,7 +450,7 @@ const LOGIN_PAGE = (banner: string, locked = false, accessUrls: string[] = []): 
 </head>
 <body>
 <div class="card">
-  <h1>DSH Web 访问鉴权</h1>
+  <h1>${htmlEscape(brandTitle || 'DSH Web 访问鉴权')}</h1>
   <div class="sub">请输入访问令牌以继续</div>
   ${banner ? `<div class="banner">${htmlEscape(banner)}</div>` : ''}
   ${locked ? '<div class="locked">尝试次数过多，已临时锁定，请稍后再试</div>' : `
@@ -489,6 +493,7 @@ const DEFAULTS: Resolved = {
   targetHost: '127.0.0.1',
   targetPort: 3080,
   token: '',
+  brandTitle: '',
   banner: '',
   allowedIps: [],
   accessUrls: [],
@@ -521,6 +526,7 @@ export function apply(ctx: Context, config?: Config): void {
       targetHost: value.targetHost ?? DEFAULTS.targetHost,
       targetPort: value.targetPort ?? DEFAULTS.targetPort,
       token: value.token ?? DEFAULTS.token,
+      brandTitle: value.brandTitle ?? DEFAULTS.brandTitle,
       banner: value.banner ?? DEFAULTS.banner,
       allowedIps: value.allowedIps ?? DEFAULTS.allowedIps,
       accessUrls: value.accessUrls ?? DEFAULTS.accessUrls,
@@ -752,7 +758,7 @@ export function apply(ctx: Context, config?: Config): void {
       if (isLockedOut(ip)) {
         if (pathname === loginPath) {
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-          res.end(LOGIN_PAGE(c.banner, true, c.accessUrls))
+          res.end(LOGIN_PAGE(c.brandTitle, c.banner, true, c.accessUrls))
         } else {
           res.writeHead(403, { 'content-type': 'text/plain' })
           res.end('locked out')
@@ -772,12 +778,12 @@ export function apply(ctx: Context, config?: Config): void {
           } else {
             recordFailure(ip, c.maxFailures, c.lockoutMinutes)
             res.writeHead(401, { 'content-type': 'text/html; charset=utf-8' })
-            res.end(LOGIN_PAGE(c.banner, false, c.accessUrls).replace('<div class="err"></div>', '<div class="err">令牌错误，请重试</div>'))
+            res.end(LOGIN_PAGE(c.brandTitle, c.banner, false, c.accessUrls).replace('<div class="err"></div>', '<div class="err">令牌错误，请重试</div>'))
           }
           return
         }
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-        res.end(LOGIN_PAGE(c.banner, false, c.accessUrls))
+        res.end(LOGIN_PAGE(c.brandTitle, c.banner, false, c.accessUrls))
         return
       }
 

@@ -29,6 +29,7 @@
         port: 8443
         targetHost: '127.0.0.1'
         targetPort: 3080
+        brandTitle: 'Harness'
         token: !!js process.env.DSH_AUTH_TOKEN ?? 'change-me'
         banner: ''
         allowedIps: []
