@@ -77,7 +77,6 @@ dsh plugin --profile web remove @wxyzh/dsh-auth-proxy
 | `targetHost` | `127.0.0.1` | 回环转发目标 |
 | `targetPort` | `3080` | 回环转发端口 |
 | `token` | 见下 | 共享访问令牌 |
-| `brandTitle` | `''` | 登录页品牌标题（作用于 `<title>` 与页首标题），空 = 内置默认「DSH 访问鉴权」 |
 | `banner` | `''` | 登录页横幅文案 |
 | `allowedIps` | `[]` | IP 白名单（如 `["127.0.0.1", "10.0.0.0/8"]`），空 = 一律要令牌 |
 | `accessUrls` | `[]` | 对外访问地址（可含 HTTPS 域名，多域名逗号分隔），仅用于展示 |

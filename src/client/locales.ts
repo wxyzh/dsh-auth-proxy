@@ -19,7 +19,6 @@ export type AuthProxyKey =
   | 'fields.targetPort'
   | 'fields.token'
   | 'fields.tokenHint'
-  | 'fields.brandTitle'
   | 'fields.banner'
   | 'fields.allowedIps'
   | 'fields.accessUrls'
@@ -51,7 +50,6 @@ export const zh: Record<AuthProxyKey, string> = {
   'fields.targetPort': '目标端口',
   'fields.token': '访问令牌',
   'fields.tokenHint': '留空保持当前令牌不变',
-  'fields.brandTitle': '登录页品牌标题',
   'fields.banner': '登录页横幅',
   'fields.allowedIps': 'IP 白名单（逗号分隔，支持 CIDR）',
   'fields.accessUrls': '访问地址',
@@ -84,7 +82,6 @@ export const en: Record<AuthProxyKey, string> = {
   'fields.targetPort': 'Target port',
   'fields.token': 'Access token',
   'fields.tokenHint': 'Leave empty to keep the current token',
-  'fields.brandTitle': 'Login page brand title',
   'fields.banner': 'Login page banner',
   'fields.allowedIps': 'IP allowlist (comma-separated, CIDR supported)',
   'fields.accessUrls': 'Access URLs',
