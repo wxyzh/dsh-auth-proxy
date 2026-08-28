@@ -367,7 +367,8 @@ for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'ch
   // comes back renamed and carrying the setter-override script.
   const upstream = httpCreateServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    res.end('<!doctype html><html><head><title>DeepSeek Harness</title></head><body>ok</body></html>')
+    const title = req.url === '/copilot' ? '<title>Copilot Harness</title>' : '<title>DeepSeek Harness</title>'
+    res.end(`<!doctype html><html><head>${title}</head><body>ok</body></html>`)
   })
   const up = await new Promise((resolve, reject) => {
     upstream.on('error', reject)
@@ -380,6 +381,8 @@ for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'ch
   const page = await httpGet(p, '/', { cookie })
   ok(page.body.includes('<title>Harness</title>'), 'static <title> rewritten to the brand')
   ok(page.body.includes('var brand = "Harness"') && page.body.includes("getOwnPropertyDescriptor(Document.prototype"), 'setter-override script present in the forwarded HTML')
+  const copilot = await httpGet(p, '/copilot', { cookie })
+  ok(copilot.body.includes('<title>Harness</title>') && !copilot.body.includes('<title>Copilot Harness</title>'), 'any static <title> (e.g. a brand plugin\'s "Copilot Harness") is rewritten to the configured brand')
 
   // Empty brand -> untouched (no rewrite at all).
   const p0 = await freePort()

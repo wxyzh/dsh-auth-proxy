@@ -77,7 +77,7 @@ dsh plugin --profile web remove @wxyzh/dsh-auth-proxy
 | `targetHost` | `127.0.0.1` | 回环转发目标 |
 | `targetPort` | `3080` | 回环转发端口 |
 | `token` | 见下 | 共享访问令牌 |
-| `brandTitle` | `'Harness'` | 转发页签标题品牌：把前端硬编码的 `document.title` 里的 `DeepSeek Harness` 替换为该值（并在静态 `<title>` 里替换）；留空则完全不改写/不注入，还原原生标题 |
+| `brandTitle` | `'Harness'` | 转发页签标题品牌：把前端硬编码的 `document.title` 里的 `DeepSeek Harness` 替换为该值（静态 `<title>` 亦整体换成该值，空串则完全不改写/不注入，还原原生标题） |
 | `banner` | `''` | 登录页横幅文案 |
 | `allowedIps` | `[]` | IP 白名单（如 `["127.0.0.1", "10.0.0.0/8"]`），空 = 一律要令牌 |
 | `accessUrls` | `[]` | 对外访问地址（可含 HTTPS 域名，多域名逗号分隔），仅用于展示 |

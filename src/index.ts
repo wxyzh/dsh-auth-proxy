@@ -749,12 +749,14 @@ export function apply(ctx: Context, config?: Config): void {
         upstream.on('data', (c: Buffer) => chunks.push(c))
         upstream.on('end', () => {
           let body = Buffer.concat(chunks).toString('utf8')
-          // Rename the static <title> (<title>DeepSeek Harness</title>) so the
-          // pre-client frame shows the brand; the injected setter override keeps it
-          // that way once the React title projection engages.
+          // Rename the static <title> so the pre-client frame shows the brand
+          // (the upstream may carry any hardcoded product title, e.g.
+          // "DeepSeek Harness" or a brand plugin's "Copilot Harness"); the
+          // injected setter override keeps document.title branded once the React
+          // title projection engages. Empty brand -> no rewrite at all.
           const brand = live.brandTitle
-          if (brand && body.includes('<title>DeepSeek Harness</title>')) {
-            body = body.replace('<title>DeepSeek Harness</title>', `<title>${htmlEscape(brand)}</title>`)
+          if (brand) {
+            body = body.replace(/<title>([^<]*)<\/title>/i, () => `<title>${htmlEscape(brand)}</title>`)
           }
           if (body.includes('</head>')) {
             const injections = [`${UUID_POLYFILL}\n${LOOPBACK_COMPAT_SCRIPT}`]
