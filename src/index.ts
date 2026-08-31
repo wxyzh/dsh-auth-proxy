@@ -42,7 +42,7 @@ import { readFileSync } from 'node:fs'
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import z from 'schemastery'
 import { clearInterval, clearTimeout, setInterval, setTimeout } from 'node:timers'
@@ -62,7 +62,7 @@ export const inject: string[] = []
  * Settings namespace of this plugin — the section the Web settings surface
  * edits. Lowercase kebab-case (the dsh-settings contract).
  */
-export const AUTH_SETTINGS_NAMESPACE = settingsNamespace('dsh-auth-proxy')
+export const AUTH_SETTINGS_NAMESPACE = 'dsh-auth-proxy' as const
 
 export interface Brand {
   /** Master switch — when false the whole brand layer is skipped. */
@@ -649,6 +649,39 @@ function htmlEscape(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
+/**
+ * Shared HTML decoration for forwarded pages: brand <title> rewrite, the UUID
+ * polyfill + loopback-compat scripts, brand title/logo scripts and the favicon
+ * link swap — all injected before `</head>`. Used by both the normal forward
+ * path and the 401-gate retry path so branding applies on the first load too.
+ */
+function decorateHtml(body: string, brand: BrandResolved, logger: DebugLogger): string {
+  // Rename the static <title> so the pre-client frame shows the brand (the
+  // upstream may carry any hardcoded product title, e.g. "DeepSeek Harness" or
+  // a brand plugin's "Copilot Harness"); the injected setter override keeps
+  // document.title branded once the React title projection engages.
+  if (brand.enabled && brand.title) {
+    body = body.replace(/<title>([^<]*)<\/title>/i, () => `<title>${htmlEscape(brand.title)}</title>`)
+  }
+  if (body.includes('</head>')) {
+    const injections = [`${UUID_POLYFILL}\n${LOOPBACK_COMPAT_SCRIPT}`]
+    if (brand.enabled && brand.title) injections.push(titleBrandScript(brand.title))
+    // Copilot sidebar/hero visual occupants (wraps the official brand graph entry).
+    if (brand.enabled && brand.logo) injections.push(brandVisualScript(brand.wordmark || 'Copilot'))
+    // Favicon: replace the upstream stock icon link with the brand SVG.
+    if (brand.enabled) {
+      const iconHref = svgDataUri(resolveBrandIcon(brand, logger))
+      if (/<link[^>]*rel=["']?icon["']?[^>]*>/i.test(body)) {
+        body = body.replace(/<link[^>]*rel=["']?icon["']?[^>]*>/i, `<link rel="icon" type="image/svg+xml" href="${iconHref}" />`)
+      } else {
+        injections.push(`<link rel="icon" type="image/svg+xml" href="${iconHref}" />`)
+      }
+    }
+    body = body.replace('</head>', `${injections.join('\n')}\n</head>`)
+  }
+  return body
+}
+
 const LOGIN_PAGE = (banner: string, locked = false, accessUrls: string[] = []): string => `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -721,6 +754,111 @@ function readBody(req: IncomingMessage, cap = 64 * 1024): Promise<string> {
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
     req.on('error', reject)
   })
+}
+
+// ── upstream (dsh web) browser-token auth auto-exchange ──────────────
+// DSH 0.1.2-alpha.x enables a per-process launch-token gate on the Host index
+// (browser-auth, constant-on, no disable switch). The token is printed to the
+// dsh web process stdout as `dsh web: http://127.0.0.1:<port>/?token=<t>` and
+// lives only in that process. The launch-token cookie is authority-bound (the
+// proxy rewrites Host to targetHost:targetPort, so the authority is stable), not
+// browser-bound — an exchanged cookie is therefore reusable for every client.
+// This module performs the exchange server-side (auto-consume 303 + Set-Cookie)
+// and replays the client's request with the cookie, so remote users never see
+// the `dsh web authentication required` 401.
+
+interface UpstreamAuthState {
+  /** Exchanged `dsh-auth-<authority>` cookie value, reused until invalidated. */
+  cookie: string | undefined
+  /** stdout log path we last read the token from. */
+  lastLogPath: string | undefined
+  /** Number of bytes at last successful read (detect dsh-web restart/new token). */
+  lastLogSize: number
+  /** Monotonic guard against concurrent exchanges. */
+  exchanging: boolean
+}
+
+const upstreamAuth: UpstreamAuthState = {
+  cookie: undefined,
+  lastLogPath: undefined,
+  lastLogSize: 0,
+  exchanging: false,
+}
+
+const UPSTREAM_AUTH_401_BODY = 'dsh web authentication required'
+const SUPERVIISORD_LOG_DIR = process.env.DSH_AUTH_PROXY_LOG_DIR
+  ?? 'C:/tools/home/supervisord/logs'
+const DSH_WEB_STDOUT_FILE = process.env.DSH_AUTH_PROXY_STDOUT_LOG
+  ?? `${SUPERVIISORD_LOG_DIR}/dsh-web-stdout.log`
+
+/**
+ * Extract the newest `token=` value from the dsh web stdout log. Returns
+ * undefined when the log is unreadable or carries no launch URL yet.
+ */
+function readLaunchToken(): string | undefined {
+  try {
+    const text = readFileSync(DSH_WEB_STDOUT_FILE, 'utf8')
+    const match = [...text.matchAll(/dsh web: http:\/\/[^\s]+\?token=([A-Za-z0-9_-]+)/g)]
+    if (match.length === 0) return undefined
+    const last = match[match.length - 1]
+    // Track size so a later dsh-web restart (superseding token) is caught.
+    upstreamAuth.lastLogSize = Buffer.byteLength(text)
+    return last[1] ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Perform the launch-token exchange against the loopback target and store the
+ * issued cookie. Replaces the guard's own Set-Cookie response (303) with the
+ * cookie value for reuse. Idempotent per dsh-web activation; a failure clears
+ * the cached cookie so the next 401 triggers a retry.
+ */
+async function exchangeUpstreamToken(
+  targetHost: string,
+  targetPort: number,
+  logger: { warn?: (msg: string) => void },
+): Promise<boolean> {
+  if (upstreamAuth.exchanging) return false
+  const token = readLaunchToken()
+  if (token === undefined) return false
+  upstreamAuth.exchanging = true
+  try {
+    const cookie = await new Promise<string | undefined>((resolveP, rejectP) => {
+      const target = `http://${targetHost}:${targetPort}/?token=${token}`
+      const headers = { host: `${targetHost}:${targetPort}` }
+      const req = httpRequest(target, {
+        method: 'GET',
+        headers,
+        timeout: 5000,
+      }, (upstream) => {
+        upstream.on('data', () => {})
+        upstream.on('end', () => {
+          const setCookie = upstream.headers['set-cookie']
+          if (setCookie === undefined) { rejectP(new Error('no set-cookie from exchange')); return }
+          const list = Array.isArray(setCookie) ? setCookie : [setCookie]
+          const authCookie = list.find((c) => c.toLowerCase().startsWith('dsh-auth-'))
+          if (authCookie === undefined) { rejectP(new Error('no dsh-auth cookie')); return }
+          resolveP(authCookie)
+        })
+      })
+      req.on('error', (err) => rejectP(err))
+      req.on('timeout', () => {
+        req.destroy(new Error('exchange timeout'))
+        rejectP(new Error('exchange timeout'))
+      })
+      req.end()
+    })
+    upstreamAuth.cookie = cookie
+    upstreamAuth.exchanging = false
+    return cookie !== undefined
+  } catch (err) {
+    logger.warn?.(`dsh-auth-proxy: upstream token exchange failed ${String(err)}`)
+    upstreamAuth.exchanging = false
+    upstreamAuth.cookie = undefined
+    return false
+  }
 }
 
 /** Schema defaults, re-read for hand-built test contexts (the loader applies them normally). */
@@ -927,8 +1065,24 @@ export function apply(ctx: Context, config?: Config): void {
     /** Patch content-length for a rewritten response body, or strip it. */
     const fixLength = (res: ServerResponse, headers: Record<string, string | string[] | number | undefined>, bodyLen: number): void => {
       const out = { ...headers }
+      // We always respond uncompressed (upstream was asked for identity); never
+      // advertise an encoding we did not actually apply.
+      delete out['content-encoding']
       if (out['content-length'] !== undefined) out['content-length'] = String(bodyLen)
       res.writeHead(200, out)
+    }
+
+    /**
+     * Strip any content-encoding from an upsream response header set before
+     * relaying to the client (used on the non-HTML pass-through, whose body is
+     * piped untouched — so it must not promise an encoding nodover). Since we
+     * always ask upstream for identity, this is defensive.
+     */
+    const strippedHeaders = (headers: Record<string, string | string[] | number | undefined>): Record<string, string | string[] | number | undefined> => {
+      const out = { ...headers }
+      delete out['content-encoding']
+      delete out['transfer-encoding']
+      return out
     }
 
     /**
@@ -949,6 +1103,29 @@ export function apply(ctx: Context, config?: Config): void {
       const headers = { ...req.headers }
       headers.host = `${live.targetHost}:${live.targetPort}`
       if (headers.origin) headers.origin = `http://${live.targetHost}:${live.targetPort}`
+      // Force upstream to reply uncompressed: the proxy buffers and rewrites HTML
+      // bodies (`</head>` injection, brand), and has no decompressor — passing a
+      // browser's Accept-Encoding through yields gzip bytes that get mutilated
+      // and then mislabeled `content-encoding: gzip`, crashing the browser with
+      // ERR_CONTENT_DECODING_FAILED (blank page). Respond to the client still
+      // allowing compression only if we ever actually compress; today we do not.
+      delete headers['accept-encoding']
+      headers['accept-encoding'] = 'identity'
+      // Attach the upstream launch-token cookie to every forward by MERGING it into
+      // whatever the client sent — a logged-in browser always carries its own proxy-
+      // session cookie (`dsh_auth_session`), so requiring an empty Cookie header
+      // meant the upstream `dsh-auth-*` cookie was never attached after login
+      // (every /api/* -> 401, manifest returned the 401 text, and HTML always
+      // fell down the un-decorated retry branch so the brand rewrite never ran).
+      if (upstreamAuth.cookie !== undefined) {
+        const authName = upstreamAuth.cookie.split(';')[0].split('=')[0]
+        const existing = headers.cookie
+        const already = existing !== undefined && existing
+          .split(';').some((c) => c.trim().startsWith(authName + '='))
+        if (!already) {
+          headers.cookie = existing ? `${existing}; ${upstreamAuth.cookie}` : upstreamAuth.cookie
+        }
+      }
       // The proxy is the network edge: never forward a client-spoofed
       // X-Forwarded-For / X-Real-IP to the loopback target.
       delete headers['x-forwarded-for']
@@ -965,8 +1142,18 @@ export function apply(ctx: Context, config?: Config): void {
         const pathname = new URL(req.url ?? '/', 'http://x').pathname
         const isHtml = contentType.toLowerCase().includes('text/html')
         const isManifest = contentType.toLowerCase().includes('manifest') || /\.(?:web)?manifest$/i.test(pathname)
-        if (!isHtml && !isManifest) {
-          res.writeHead(upstream.statusCode ?? 502, upstream.statusMessage, upstream.headers)
+        // DSH 0.1.2-alpha.x browser-token gate answers the HTML index with a
+        // text/plain 401 `dsh web authentication required...`. Intercept ANY
+        // such 401 on the root path (regardless of client Accept — real browsers
+        // always send text/html, but a bare curl/reloader must not leak the
+        // gate), swap the launch token server-side and replay with the cookie
+        // so remote users never see the gate. `/api/*` and other paths keep
+        // their own status codes and pass through untouched.
+        const isUpstreamAuth401 = (upstream.statusCode ?? 0) === 401
+          && pathname === '/'
+          && !isManifest
+        if (!isHtml && !isManifest && !isUpstreamAuth401) {
+          res.writeHead(upstream.statusCode ?? 502, upstream.statusMessage, strippedHeaders(upstream.headers as Record<string, string | string[] | number | undefined>))
           upstream.pipe(res)
           return
         }
@@ -976,34 +1163,103 @@ export function apply(ctx: Context, config?: Config): void {
         upstream.on('data', (c: Buffer) => chunks.push(c))
         upstream.on('end', () => {
           let body = Buffer.concat(chunks).toString('utf8')
+          // DSH 0.1.2-alpha.x browser-token gate: the Host index answers 401
+          // `dsh web authentication required...` (no session cookie). Swap the
+          // launch token server-side and replay this navigation with the cookie
+          // so the remote client never sees the gate. Only page navigations are
+          // intercepted (the gate only gates the HTML index; API/WS keep their
+          // own status codes, which the non-HTML branch already passes through).
+          if (
+            isUpstreamAuth401
+            && body.includes(UPSTREAM_AUTH_401_BODY)
+          ) {
+            const exchange = async (): Promise<void> => {
+              if (upstreamAuth.cookie === undefined) {
+                await exchangeUpstreamToken(live.targetHost, live.targetPort, ctx.logger)
+              }
+              if (upstreamAuth.cookie === undefined) {
+                // Still no cookie: surface the gate honestly instead of a loop.
+                res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+                res.end(`${UPSTREAM_AUTH_401_BODY}; retry after dsh-web prints a launch URL.\n`)
+                return
+              }
+              const retryHeaders = { ...req.headers }
+              delete retryHeaders['cookie']
+              retryHeaders.cookie = upstreamAuth.cookie
+              retryHeaders.host = `${live.targetHost}:${live.targetPort}`
+              delete retryHeaders['accept-encoding']
+              retryHeaders['accept-encoding'] = 'identity'
+              const retry = httpRequest(targetUrl, { method: req.method, headers: retryHeaders }, (retryUpstream) => {
+                const retryChunks: Buffer[] = []
+                retryUpstream.on('data', (c: Buffer) => retryChunks.push(c))
+                retryUpstream.on('end', () => {
+                  const retryBody = Buffer.concat(retryChunks).toString('utf8')
+                  const retryHeadersOut = { ...retryUpstream.headers } as Record<string, string | string[] | number | undefined>
+                  if ((retryUpstream.statusCode ?? 0) === 401) {                    // The cookie expired between reads (dsh-web restarted): clear and retry once more.
+                    upstreamAuth.cookie = undefined
+                    exchangeUpstreamToken(live.targetHost, live.targetPort, ctx.logger)
+                      .then((ok) => {
+                        if (!ok || upstreamAuth.cookie === undefined) {
+                          res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+                          res.end(`${UPSTREAM_AUTH_401_BODY}; retry after dsh-web prints a launch URL.\n`)
+                          return
+                        }
+                        retryHeaders.cookie = upstreamAuth.cookie
+                        const retry2 = httpRequest(targetUrl, { method: req.method, headers: retryHeaders }, (r2) => {
+                          const r2Chunks: Buffer[] = []
+                          r2.on('data', (c: Buffer) => r2Chunks.push(c))
+                          r2.on('end', () => {
+                            const r2Headers = { ...r2.headers } as Record<string, string | string[] | number | undefined>
+                            const r2Body = Buffer.concat(r2Chunks).toString('utf8')
+                            const out2 = decorateHtml(r2Body, live.brand, ctx.logger)
+                            const outBuf2 = Buffer.from(out2, 'utf8')
+                            fixLength(res, r2Headers, outBuf2.length)
+                            res.end(outBuf2)
+                          })
+                        })
+                        retry2.on('error', () => res.destroy())
+                        retry2.end()
+                      })
+                      .catch(() => {
+                        res.writeHead(502)
+                        res.end('upstream unavailable')
+                      })
+                    return
+                  }
+                  const outBody = decorateHtml(retryBody, live.brand, ctx.logger)
+                  const outBuf = Buffer.from(outBody, 'utf8')
+                  fixLength(res, retryHeadersOut, outBuf.length)
+                  res.end(outBuf)
+                })
+                retryUpstream.on('error', () => res.destroy())
+              })
+              retry.on('error', (err) => {
+                ctx.logger.warn(`dsh-auth-proxy: upstream retry error ${String(err)}`)
+                if (!res.headersSent) {
+                  res.writeHead(502)
+                  res.end('upstream unavailable')
+                } else {
+                  res.destroy()
+                }
+              })
+              retry.end()
+            }
+            exchange().catch((err) => {
+              ctx.logger.warn(`dsh-auth-proxy: exchange handler error ${String(err)}`)
+              if (!res.headersSent) {
+                res.writeHead(502)
+                res.end('proxy exchange error')
+              } else {
+                res.destroy()
+              }
+            })
+            return
+          }
           const brand = live.brand
           if (isManifest) {
             body = rewriteManifest(body, brand, ctx.logger)
           } else {
-            // Rename the static <title> so the pre-client frame shows the brand
-            // (the upstream may carry any hardcoded product title, e.g.
-            // "DeepSeek Harness" or a brand plugin's "Copilot Harness"); the
-            // injected setter override keeps document.title branded once the React
-            // title projection engages. Only when brandLogo/unbranded -> no rewrite.
-            if (brand.enabled && brand.title) {
-              body = body.replace(/<title>([^<]*)<\/title>/i, () => `<title>${htmlEscape(brand.title)}</title>`)
-            }
-            if (body.includes('</head>')) {
-              const injections = [`${UUID_POLYFILL}\n${LOOPBACK_COMPAT_SCRIPT}`]
-              if (brand.enabled && brand.title) injections.push(titleBrandScript(brand.title))
-              // Copilot sidebar/hero visual occupants (wraps the official brand graph entry).
-              if (brand.enabled && brand.logo) injections.push(brandVisualScript(brand.wordmark || 'Copilot'))
-              // Favicon: replace the upstream stock icon link with the brand SVG.
-              if (brand.enabled) {
-                const iconHref = svgDataUri(resolveBrandIcon(brand, ctx.logger))
-                if (/<link[^>]*rel=["']?icon["']?[^>]*>/i.test(body)) {
-                  body = body.replace(/<link[^>]*rel=["']?icon["']?[^>]*>/i, `<link rel="icon" type="image/svg+xml" href="${iconHref}" />`)
-                } else {
-                  injections.push(`<link rel="icon" type="image/svg+xml" href="${iconHref}" />`)
-                }
-              }
-              body = body.replace('</head>', `${injections.join('\n')}\n</head>`)
-            }
+            body = decorateHtml(body, brand, ctx.logger)
           }
           const out = Buffer.from(body, 'utf8')
           const headersOut = { ...upstream.headers } as Record<string, string | string[] | number | undefined>
@@ -1132,6 +1388,17 @@ export function apply(ctx: Context, config?: Config): void {
     if (req.headers.origin) req.headers.origin = `http://${live.targetHost}:${live.targetPort}`
     delete req.headers['x-forwarded-for']
     delete req.headers['x-real-ip']
+    // The upstream launch-token cookie must ride along on the WS handshake too;
+    // merge instead of requiring an empty Cookie header (same rationale as forward()).
+    if (upstreamAuth.cookie !== undefined) {
+      const authName = upstreamAuth.cookie.split(';')[0].split('=')[0]
+      const existing = req.headers.cookie
+      const already = existing !== undefined && existing
+        .split(';').some((c) => c.trim().startsWith(authName + '='))
+      if (!already) {
+        req.headers.cookie = existing ? `${existing}; ${upstreamAuth.cookie}` : upstreamAuth.cookie
+      }
+    }
     const targetUrl = `http://${live.targetHost}:${live.targetPort}${req.url ?? '/'}`
     const proxy = httpRequest(targetUrl, { method: req.method, headers: req.headers })
     const onSocketError = (err: Error): void => {
@@ -1169,7 +1436,7 @@ export function apply(ctx: Context, config?: Config): void {
   // The dsh-settings scope (when present) is the single config source: the
   // settings provider persists a per-namespace user document, the composition
   // entry is the `base` layer, and the registered scope resolves the three.
-  // installSettingsSection keeps the plugin working when no settings service is
+  // installSection keeps the plugin working when no settings service is
   // composed (falls back to the composition entry).
   //
   // The `validate` hook is the write gate that _rejects_ a stored section the
@@ -1177,19 +1444,21 @@ export function apply(ctx: Context, config?: Config): void {
   // where the listen-host policy and the token-placeholder refusal live, exactly as
   // the settings Service Definition intends: the Host is the only authority on
   // whether a write landed.
-  installSettingsSection(ctx, AUTH_SETTINGS_NAMESPACE, Config, config ?? ({} as Config), {
-    setSource: (source) => {
-      base = source
-      sync()
-    },
-    onChange: sync,
-    validate: (value) => {
-      const v = { ...DEFAULTS, ...(value as Partial<Config>) }
-      // A placeholder/empty token is a LEGAL stored value — the proxy simply stays
-      // disabled — so only the listen-host policy is a hard rejection (no TLS).
-      const hostIssue = listenHostIssue(v.host ?? DEFAULTS.host)
-      if (hostIssue) throw new Error(hostIssue)
-    },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, AUTH_SETTINGS_NAMESPACE, Config, config ?? ({} as Config), {
+      setSource: (source) => {
+        base = source
+        sync()
+      },
+      onChange: sync,
+      validate: (value) => {
+        const v = { ...DEFAULTS, ...(value as Partial<Config>) }
+        // A placeholder/empty token is a LEGAL stored value — the proxy simply stays
+        // disabled — so only the listen-host policy is a hard rejection (no TLS).
+        const hostIssue = listenHostIssue(v.host ?? DEFAULTS.host)
+        if (hostIssue) throw new Error(hostIssue)
+      },
+    })
   })
 
   // ── read-only runtime status (the write path is the dsh-settings scope) ──
