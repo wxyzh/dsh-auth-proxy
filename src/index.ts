@@ -116,7 +116,11 @@ export interface Config {
   allowedIps?: string[]
   /**
    * Public entry URLs (may be https domains) the proxy is reachable through.
-   * Display only: shown on the settings card and the login page.
+   * Shown on the settings card and the login page, AND used as the loopback
+   * whitelist: when non-empty, only pages whose origin/host matches an entry
+   * are treated as loopback (local-admin) — everything else reached through
+   * the proxy stays remote read-only. Empty list = every proxied page counts
+   * as loopback (legacy behavior).
    */
   accessUrls?: string[]
   /** Failed login attempts before an IP is locked out (0 disables lockout). */
@@ -385,71 +389,69 @@ const UUID_POLYFILL = `<script>
  * wrapped too; the accessor path remains only for older boots that assign
  * the loader later.
  */
-export const LOOPBACK_COMPAT_SCRIPT = `<script>
+/**
+ * Build the loopback-compat shim injected into every forwarded HTML response.
+ * When `trustedOrigins` is non-empty, the shim only forces the connection
+ * loopback flag for page origins/hosts that match the list (the proxy's own
+ * access URLs); any other source reached through the proxy stays remote
+ * read-only. An empty list keeps the historical unconditional behavior —
+ * every proxied page is treated as loopback, matching the pre-whitelist state.
+ */
+export function loopbackCompatScript(trustedOrigins: string[] = []): string {
+  const list = JSON.stringify(trustedOrigins)
+  return `<script>
 (function () {
-  var wrapLoad = function (load) {
-    return function (entry) {
-      if (entry && typeof entry === 'object'
-          && entry.id === '@deepseek-ai/dsh-client-connection'
-          && typeof entry.factory === 'function') {
-        var originalFactory = entry.factory;
-        entry.factory = function (require) {
-          var exports = originalFactory(require);
-          if (exports && typeof exports.apply === 'function') {
-            var originalApply = exports.apply;
-            exports.apply = function (ctx) {
-              var result = originalApply.apply(this, arguments);
-              try {
-                var handle = ctx && typeof ctx.get === 'function' ? ctx.get('connection') : undefined;
-                if (handle && typeof handle === 'object' && handle.isLoopback === false) {
-                  handle.isLoopback = true;
-                }
-              } catch (err) { /* keep the read-only behavior on failure */ }
-              return result;
-            };
-          }
-          return exports;
-        };
-      }
-      return load.apply(this, arguments);
-    };
+  // Diagnostic ring: reports every step this shim takes so a real-browser console
+  // can be checked for where the chain broke (window.__dshLoopbackDiag).
+  var diag = [];
+  var pushDiag = function (msg) {
+    try { diag.push(msg); if (diag.length > 60) diag.shift(); window.__dshLoopbackDiag = diag.slice(); } catch (err) {}
   };
-  // dsh rc.8: create() swaps the facade from pending-queue to live
-  // registration; re-wrap load afterwards so no registration escapes.
-  var wrapCreate = function (create) {
-    return function (options) {
-      var result = create.call(this, options);
-      if (this && typeof this.load === 'function') this.load = wrapLoad(this.load);
-      return result;
-    };
+  // Optional trusted-origin whitelist (auth-proxy accessUrls). Empty = every
+  // proxied page counts as loopback (legacy behavior); non-empty = only pages
+  // whose origin/host matches get the local-admin identity.
+  var TRUSTED_ORIGINS = ${list};
+  var isTrustedOrigin = function () {
+    if (!TRUSTED_ORIGINS || TRUSTED_ORIGINS.length === 0) return true;
+    try {
+      var origin = String(location.origin || '').toLowerCase().replace(/\\/+$/, '');
+      var host = String(location.host || location.hostname || '').toLowerCase();
+      var hostname = String(location.hostname || '').toLowerCase();
+      for (var i = 0; i < TRUSTED_ORIGINS.length; i++) {
+        var t = String(TRUSTED_ORIGINS[i]).toLowerCase().replace(/\\/+$/, '');
+        var tOrigin = t;
+        var tHost = t.indexOf('://') >= 0 ? t.slice(t.indexOf('://') + 3) : t;
+        if (tOrigin === origin) return true;
+        if (tHost === host || tHost === hostname) return true;
+      }
+      return false;
+    } catch (err) { return false; }
   };
   try {
-    var existing = globalThis.__ModuleLoader__;
-    if (existing && typeof existing.load === 'function') {
-      // rc.8: the queue facade already lives on the page (head top).
-      existing.load = wrapLoad(existing.load);
-      if (typeof existing.create === 'function') existing.create = wrapCreate(existing.create);
-      return;
-    }
-    // Older boots assign the loader later; capture the assignment and wrap.
-    var realLoader = undefined;
-    var installed = false;
-    Object.defineProperty(globalThis, '__ModuleLoader__', {
-      configurable: true,
-      enumerable: true,
-      get: function () { return realLoader; },
-      set: function (loader) {
-        if (!loader || typeof loader.load !== 'function') return;
-        if (installed) { realLoader = loader; return; }
-        installed = true;
-        realLoader = loader;
-        loader.load = wrapLoad(loader.load);
-        if (typeof loader.create === 'function') loader.create = wrapCreate(loader.create);
-      }
-    });
-  } catch (err) { /* keep the read-only behavior on failure */ }
+    pushDiag('LOOPBACK_COMPAT_SCRIPT start');
+    if (!isTrustedOrigin()) { pushDiag('origin not trusted; skipping seed'); return; }
+    // dsh-client-connection computes "isLoopback" from transport.ownsHost
+    // (lib/client.js:4729). The transport global is never assigned anywhere in
+    // the dsh web app - web shell reads o?.loadBundle, the connection bundle
+    // reads transport?.fetch/openStream, all through optional chaining - so
+    // seeding __DSH_TRANSPORT__ with ownsHost:true makes the proxied page count
+    // as loopback WITHOUT touching the module system at all. This is the whole
+    // point: no __ModuleLoader__ wrapping, no ctx.provide patching, nothing that
+    // could disturb service registration (which is what white-screened boot).
+    var prev = globalThis.__DSH_TRANSPORT__;
+    globalThis.__DSH_TRANSPORT__ = Object.assign(
+      {},
+      prev && typeof prev === 'object' ? prev : {},
+      { ownsHost: true }
+    );
+    pushDiag('seeded __DSH_TRANSPORT__.ownsHost = true');
+  } catch (err) { pushDiag('seed error: ' + String(err)); }
 })();
 </script>`
+}
+
+/** Legacy export: the unconditional loopback shim (empty whitelist = force every proxied page). Kept for downstream imports and the smoke suite. */
+export const LOOPBACK_COMPAT_SCRIPT = loopbackCompatScript()
 
 /**
  * Client script that renames the browser tab to a custom brand. dsh's own
@@ -655,7 +657,7 @@ function htmlEscape(value: string): string {
  * link swap — all injected before `</head>`. Used by both the normal forward
  * path and the 401-gate retry path so branding applies on the first load too.
  */
-function decorateHtml(body: string, brand: BrandResolved, logger: DebugLogger): string {
+function decorateHtml(body: string, brand: BrandResolved, logger: DebugLogger, trustedOrigins: string[] = []): string {
   // Rename the static <title> so the pre-client frame shows the brand (the
   // upstream may carry any hardcoded product title, e.g. "DeepSeek Harness" or
   // a brand plugin's "Copilot Harness"); the injected setter override keeps
@@ -664,7 +666,7 @@ function decorateHtml(body: string, brand: BrandResolved, logger: DebugLogger): 
     body = body.replace(/<title>([^<]*)<\/title>/i, () => `<title>${htmlEscape(brand.title)}</title>`)
   }
   if (body.includes('</head>')) {
-    const injections = [`${UUID_POLYFILL}\n${LOOPBACK_COMPAT_SCRIPT}`]
+    const injections = [`${UUID_POLYFILL}\n${loopbackCompatScript(trustedOrigins)}`]
     if (brand.enabled && brand.title) injections.push(titleBrandScript(brand.title))
     // Copilot sidebar/hero visual occupants (wraps the official brand graph entry).
     if (brand.enabled && brand.logo) injections.push(brandVisualScript(brand.wordmark || 'Copilot'))
@@ -1211,7 +1213,7 @@ export function apply(ctx: Context, config?: Config): void {
                           r2.on('end', () => {
                             const r2Headers = { ...r2.headers } as Record<string, string | string[] | number | undefined>
                             const r2Body = Buffer.concat(r2Chunks).toString('utf8')
-                            const out2 = decorateHtml(r2Body, live.brand, ctx.logger)
+                            const out2 = decorateHtml(r2Body, live.brand, ctx.logger, live.accessUrls)
                             const outBuf2 = Buffer.from(out2, 'utf8')
                             fixLength(res, r2Headers, outBuf2.length)
                             res.end(outBuf2)
@@ -1226,7 +1228,7 @@ export function apply(ctx: Context, config?: Config): void {
                       })
                     return
                   }
-                  const outBody = decorateHtml(retryBody, live.brand, ctx.logger)
+                  const outBody = decorateHtml(retryBody, live.brand, ctx.logger, live.accessUrls)
                   const outBuf = Buffer.from(outBody, 'utf8')
                   fixLength(res, retryHeadersOut, outBuf.length)
                   res.end(outBuf)
@@ -1259,7 +1261,7 @@ export function apply(ctx: Context, config?: Config): void {
           if (isManifest) {
             body = rewriteManifest(body, brand, ctx.logger)
           } else {
-            body = decorateHtml(body, brand, ctx.logger)
+            body = decorateHtml(body, brand, ctx.logger, live.accessUrls)
           }
           const out = Buffer.from(body, 'utf8')
           const headersOut = { ...upstream.headers } as Record<string, string | string[] | number | undefined>

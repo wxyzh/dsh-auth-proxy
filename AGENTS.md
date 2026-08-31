@@ -48,14 +48,27 @@ auth-proxy 配置分区（`settings.section`，与 Models/General 同级，非�
   双写镜像）输出，格式前缀 `dsh-auth-proxy: `；禁止把请求级日志（debug 等）改成 console.log 刷屏。
 - **请求处理器一律读 `live` 快照**（每请求 `const c = live`），禁止闭包捕获 `sync()` 时的 cfg 快照。
 - **浏览器侧信任镜像（勿移除）**：HTML 注入除 `crypto.randomUUID` polyfill 外还有
-  `LOOPBACK_COMPAT_SCRIPT`（`src/index.ts`）——dsh web 客户端按页面源判定回环，非回环来源把设置面
-  降级为只读；而代理把 Host/Origin 改回回环后服务端本就把代理流量当回环放行（含 privileged
-  settings/credentials 方法）。该脚本在 `@deepseek-ai/dsh-client-connection` 提供服务后把
-  `connection.isLoopback` 置 true，让 web-ui 设置（主题/语言/插件配置）在代理后可编辑。鉴权仍由本插件
-  令牌墙把关，脚本不新增攻击面。注意 rc.8：`window.__ModuleLoader__` 由 webserver 在 `<head>` 顶部内联
-  注入（`injectBootManifest` 的队列 facade + `__DSH_BOOT__`），脚本必须原地包 `load` 并在 `create()`
-  切到 live 注册后重包——**禁止用 `Object.defineProperty` 访问器覆盖已存在的 facade**（会把 loader
-  变 undefined，boot 报 bootstrap facade missing）；后续若改动此机制，冒烟用例 8b 会拦截。
+  回环兼容 shim（`loopbackCompatScript(trustedOrigins)`，`src/index.ts`，旧名 `LOOPBACK_COMPAT_SCRIPT`
+  保留为无条件版导出）——dsh web 客户端按页面源判定回环，非回环来源把设置面降级为只读；而代理把
+  Host/Origin 改回回环后服务端本就把代理流量当回环放行（含 privileged settings/credentials 方法）。
+  鉴权仍由本插件令牌墙把关，脚本不新增攻击面。
+- **回环 shim = 种子 transport（2026-08-31 定稿，alpha.2 实发）**：`@deepseek-ai/dsh-client-connection`
+  的 `connection.isLoopback` 判定首项为 `transport?.ownsHost === true`（lib/client.js:4729），而
+  `globalThis.__DSH_TRANSPORT__` 在 dsh web 全库只读、从未被赋值（combo + web shell 赋值点均为 0，
+  读方全走可选链）。shim 只需 `Object.assign({}, prev, { ownsHost: true })` 种子该全局，isLoopback 即
+  恒 true；web shell 读 `o?.loadBundle`、connection 读 `transport?.fetch/openStream` 均得 undefined，
+  与无 shim 时**零行为差异**。冒烟用例 8b 校验：命中白名单才种子 / 未命中不种子 / 空白名单无条件。
+- **关键坑：禁止 patch `ctx.provide`，也禁止 wrap `__ModuleLoader__`（曾致白屏）**：曾把 connection
+  apply 拿到的全局 root ctx 的 `ctx.provide` 永久替换且不还原——cordis 后续依赖 `ctx.provide` 注册
+  `slots` 等服务，被替换后 `ctx.slots.renderSlot('root')` 报 `cannot get property "slots" without inject`
+  （combo 29580 处）→ 8443/https 白屏。wrap `__ModuleLoader__` 的 load/create 也因 alpha.2 反复
+  `create()` 换 live loader 而静默失效。**最终方案完全不触碰模块系统，只种子 transport**。若未来改回
+  模块系统手术，必须保留 `__dshLoopbackWrapped__` 幂等标记与看门狗（旧实现留档于
+  `src/index.ts.bak-loopbackA-20260831-212415`），并重跑冒烟 8b。
+- **入口白名单（trustedOrigins = accessUrls）**：`decorateHtml` 第 4 参接收 `live.accessUrls`，非空时
+  shim 只在页面 origin/host 命中列表（origin 或 host/hostname 匹配，容忍带/不带 scheme）才强制 loopback，
+  其余经代理的来源保持远程只读（保留"远程只读/本机可写"粒度）；空列表 = 无条件（历史行为，向后兼容）。
+  `accessUrls` 语义由"仅展示"升级为"展示 + 回环白名单"，改语义时勿连设置卡片与 locales 提示一起处理。
 
 ## 客户端纪律
 
@@ -88,4 +101,6 @@ npm run smoke
 `npm run smoke` 驱动构建产物（`scripts/smoke.mjs`，stub cordis ctx + 内存 settings provider，隔离真实用户配置），
 覆盖：空/占位令牌不监听、登录流程、XFF 伪造不绕过白名单、settings 写热更新不重建、settings 写改端口重建、
 settings 写占位令牌禁用、settings 校验拒绝公网监听地址、转发 HTML 双脚本注入（UUID polyfill + loopback-compat）、
-无状态会话重启存活与换令牌全体下线。
+无状态会话重启存活与换令牌全体下线。**alpha.2 适配后 stub 的 settings provider 已补 `installSection`**
+（代理到 `register` + setSource/onChange 钩子），与宿主 `dsh-settings` 的 `installSection(owner, ns, schema, entry, hooks)`
+签名一致；smoke 需在此 stub 可用的前提下跑通（当前 70 passed）。

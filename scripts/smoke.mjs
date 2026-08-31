@@ -23,7 +23,7 @@
  */
 import { createServer as httpCreateServer, request as httpRequest } from 'node:http'
 import vm from 'node:vm'
-import { apply, AUTH_SETTINGS_NAMESPACE, LOOPBACK_COMPAT_SCRIPT, titleBrandScript, brandVisualScript, rewriteManifest } from '../lib/types/index.js'
+import { apply, AUTH_SETTINGS_NAMESPACE, LOOPBACK_COMPAT_SCRIPT, loopbackCompatScript, titleBrandScript, brandVisualScript, rewriteManifest } from '../lib/types/index.js'
 
 let passed = 0
 let failed = 0
@@ -141,6 +141,21 @@ function makeSettingsProvider() {
       const reg = regs.get(ns)
       if (!reg) throw new Error(`namespace ${ns} not registered`)
       await reg.scope.update(patch)
+    },
+    /**
+     * alpha.2 settings surface: install a consumer section over the provider
+     * (base layer = composition entry; change notifications via hooks). Mirrors
+     * @deepseek-ai/dsh-settings installSection so the smoke stub matches the
+     * current host API.
+     */
+    installSection(owner, ns, schema, entry, hooks) {
+      const scope = this.register(ns, schema, {
+        base: entry,
+        ...hooks.validate === undefined ? {} : { validate: hooks.validate },
+      })
+      hooks.setSource(() => scope.get())
+      hooks.onChange()
+      scope.watch(() => { hooks.onChange() })
     },
     user(ns) { return documents[ns] ?? {} },
   }
@@ -319,8 +334,8 @@ for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'ch
   const cookie = good.headers['set-cookie']?.[0]?.split(';')[0] ?? ''
   const page = await httpGet(p, '/', { cookie })
   ok(page.status === 200 && String(page.headers['content-type']).includes('text/html'), 'authenticated HTML forwarded from upstream')
-  ok(page.body.includes('crypto.randomUUID') && page.body.includes('dsh-client-connection'), 'HTML carries the UUID polyfill and the loopback-compat shim')
-  ok(page.body.includes('isLoopback') && page.body.includes('__ModuleLoader__'), 'compat shim targets the client connection loopback flag')
+  ok(page.body.includes('crypto.randomUUID') && page.body.includes('__DSH_TRANSPORT__'), 'HTML carries the UUID polyfill and the loopback-compat shim')
+  ok(page.body.includes('ownsHost') && page.body.includes('TRUSTED_ORIGINS'), 'compat shim seeds the transport ownsHost flag')
   s.closeAll()
   await new Promise((r) => upstream.close(r))
 }
@@ -476,81 +491,49 @@ for (const [label, token] of [['empty token', ''], ['placeholder change-me', 'ch
   await new Promise((r) => upstream.close(r))
 }
 
-// ── 8b. dsh rc.8 loader boot order: facade survives + connection forced loopback ────
+// ── 8b. loopback shim seeds the transport ownsHost flag (no module-system touch) ────
 {
-  console.log('scenario: rc.8 __ModuleLoader__ boot (facade kept alive, live registration wrapped)')
-  // Mirrors what injectBootManifest now emits at the top of <head>: the queue
-  // facade plus the two preloaded bundle registrations (modules + runtime),
-  // all executing BEFORE the compat shim (which is injected before </head>).
-  const rc8Boot = `(function () {
-    window.__ModuleLoader__ = {
-      mode: 'queue',
-      pendingQueue: [],
-      registrations: [],
-      load: function (reg) {
-        if (this.mode === 'queue') { this.pendingQueue.push(reg); return; }
-        this.registrations.push(reg);
-      },
-      create: function (options) {
-        if (this.mode !== 'queue') throw new Error('create after boot');
-        var pending = this.pendingQueue.splice(0);
-        this.mode = 'live';
-        this.load = function (reg) { this.registrations.push(reg); return reg; };
-        return { ok: true, preloaded: pending.length };
-      }
-    };
-    window.__ModuleLoader__.load({ id: '@deepseek-ai/dsh-client-modules/client', factory: function () { return {}; } });
-    window.__ModuleLoader__.load({ id: '@deepseek-ai/dsh-client-runtime/client', factory: function () { return {}; } });
-  })();`
-  const sandbox = {}
-  vm.createContext(sandbox)
-  sandbox.window = sandbox
-  // head-top boot protocol runs first
-  vm.runInContext(rc8Boot, sandbox)
-  // the compat shim runs later, just before </head>; strip its <script> shell
-  const shimBody = LOOPBACK_COMPAT_SCRIPT.replace(/^<script>\n?/, '').replace(/\n?<\/script>$/, '')
-  vm.runInContext(shimBody, sandbox)
-  // rc.7 regressed here: the accessor replaced the live facade, getter -> undefined
-  const facade = vm.runInContext('window.__ModuleLoader__', sandbox)
-  ok(typeof facade === 'object' && facade !== null && typeof facade.load === 'function', 'queue facade survives the compat shim (no bootstrap-facade-missing)')
-  ok(facade.pendingQueue.length === 2, 'preloaded registrations stay queued untouched')
+  console.log('scenario: loopback shim seeds __DSH_TRANSPORT__.ownsHost (module system untouched)')
+  // The shim must not disturb the web module loader at all: it only seeds the
+  // transport global that dsh-client-connection reads for isLoopback
+  // (transport?.ownsHost === true). Whitelisted origin -> ownsHost=true; an
+  // origin outside the list -> no seed (remote read-only preserved).
+  const runShim = (trusted, origin) => {
+    const sandbox = {}
+    sandbox.globalThis = sandbox
+    sandbox.window = sandbox
+    sandbox.location = { origin, host: origin.replace(/^https?:\/\//, ''), hostname: origin.replace(/^https?:\/\//, '').split(':')[0] }
+    sandbox.__DSH_TRANSPORT__ = undefined
+    vm.createContext(sandbox)
+    const script = loopbackCompatScript(trusted).replace(/^<script>\n?/, '').replace(/\n?<\/script>$/, '')
+    vm.runInContext(script, sandbox)
+    return sandbox
+  }
 
-  // the deferred shell calls create(): materialize + switch to live registration
-  const createOut = vm.runInContext('window.__ModuleLoader__.create({})', sandbox)
-  ok(createOut && createOut.ok === true && createOut.preloaded === 2, 'create() materializes the queue without interference')
-  ok(vm.runInContext('window.__ModuleLoader__.mode', sandbox) === 'live', 'facade switched to live registration')
+  // Whitelisted origin -> ownsHost seeded true.
+  const trusted = ['https://dsh.priv.wuzh.me', 'http://192.168.11.105:8443']
+  const sandbox = runShim(trusted, 'https://dsh.priv.wuzh.me')
+  const transport = vm.runInContext('globalThis.__DSH_TRANSPORT__', sandbox)
+  ok(transport && typeof transport === 'object' && transport.ownsHost === true, 'whitelisted origin seeds __DSH_TRANSPORT__.ownsHost = true')
+  ok(vm.runInContext('globalThis.__ModuleLoader__ === undefined', sandbox) === true, 'module loader is left untouched (no facade surgery)')
 
-  // dynamic bundle scripts (async) register through the LIVE load afterwards
-  const handle = { isLoopback: false }
-  const stubCtx = { get: (name) => (name === 'connection' ? handle : undefined) }
-  vm.runInContext(`window.__ModuleLoader__.load({
-    id: '@deepseek-ai/dsh-client-connection',
-    factory: function (require) {
-      return {
-        apply: function (ctx) {
-          ctx.get('connection').builtByPlugin = true;
-        }
-      };
-    }
-  });`, sandbox)
-  const regs = vm.runInContext('window.__ModuleLoader__.registrations', sandbox)
-  const conn = regs.find((r) => r.id === '@deepseek-ai/dsh-client-connection')
-  ok(conn !== undefined, 'connection bundle registered through the wrapped live load')
-  const exports = conn.factory((spec) => { throw new Error('no external ' + spec) })
-  exports.apply(stubCtx)
-  ok(handle.isLoopback === true, 'connection apply forces isLoopback open')
-  ok(handle.builtByPlugin === true, 'original connection apply still ran')
-
-  // other bundles must pass through unwrapped (factory identity preserved)
-  vm.runInContext(`window.__ModuleLoader__.load({
-    id: 'dsh-some-other-plugin/client',
-    factory: function () { return {}; }
-  });`, sandbox)
-  const other = vm.runInContext(
-    'window.__ModuleLoader__.registrations.find(function (r) { return r.id === \'dsh-some-other-plugin/client\'; })',
+  // Simulate dsh-client-connection's isLoopback computation (lib/client.js:4729):
+  // transport?.ownsHost === true => loopback, exactly the branch the app uses.
+  const isLoopback = vm.runInContext(
+    '(() => { const t = globalThis.__DSH_TRANSPORT__; return (t && t.ownsHost === true) || false })()',
     sandbox,
   )
-  ok(other.factory.toString().indexOf('dsh-client-connection') === -1, 'non-connection bundles pass through unwrapped')
+  ok(isLoopback === true, 'connection isLoopback resolves true from the seeded transport')
+
+  // Non-whitelisted origin -> ownsHost NOT set (stays remote read-only).
+  const sandbox2 = runShim(trusted, 'https://evil.example.com')
+  const t2 = vm.runInContext('globalThis.__DSH_TRANSPORT__', sandbox2)
+  ok(t2 === undefined || t2.ownsHost !== true, 'non-whitelisted origin does not seed ownsHost (remote read-only preserved)')
+
+  // Empty whitelist = legacy unconditional behavior (every proxied page loopback).
+  const sandbox3 = runShim([], 'https://anything.example.com')
+  const t3 = vm.runInContext('globalThis.__DSH_TRANSPORT__', sandbox3)
+  ok(t3 && t3.ownsHost === true, 'empty whitelist keeps unconditional loopback (legacy behavior)')
 }
 
 // ── 9. stateless sessions: restart survival + token rotation = global logout ──
