@@ -10,9 +10,10 @@
  * bespoke config API — the only extra route is a read-only runtime status probe.
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context } from '@deepseek-ai/cordis'
+import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { AuthProxySettingsCard, type AuthProxyCardFace } from './AuthProxySettingsCard.tsx'
@@ -63,7 +64,7 @@ export const inject = ['slots', 'locale', 'settingsScope', 'connection', 'remote
  * Mount the auth-proxy settings page.
  * @param ctx - client root context.
  */
-export function apply(ctx: ClientContext): void {
+export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'auth-proxy: dictionaries')
 
   // The slot registry types are opaque to a third-party package; keep the surface
