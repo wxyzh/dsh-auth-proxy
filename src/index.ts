@@ -965,6 +965,8 @@ export function apply(ctx: Context, config?: Config): void {
   let disposeServer: (() => void) | undefined
   /** Force-close timer armed by a graceful (rebuild) teardown. */
   let graceKill: ReturnType<typeof setTimeout> | undefined
+  /** Pre-warm retry timer for the upstream launch-token exchange. */
+  let warmTimer: ReturnType<typeof setTimeout> | undefined
 
   /**
    * Drop the current listen socket. `graceful` (rebuild path) stops accepting
@@ -986,6 +988,10 @@ export function apply(ctx: Context, config?: Config): void {
     if (graceKill !== undefined) {
       clearTimeout(graceKill)
       graceKill = undefined
+    }
+    if (warmTimer !== undefined) {
+      clearTimeout(warmTimer)
+      warmTimer = undefined
     }
     if (graceful) {
       srv.close()
@@ -1376,12 +1382,47 @@ export function apply(ctx: Context, config?: Config): void {
       // Bind hosts are loopback or LAN-only by policy, so the bound URL is
       // always concrete and clickable — no separate reachable-URLs line needed.
       say(`listening on http://${next.host}:${next.port} -> http://${next.targetHost}:${next.targetPort}`)
+      // Pre-warm the upstream launch-token exchange as early as possible
+      // (see warmUpstreamExchange below).
+      warmUpstreamExchange()
     })
 
     server = srv
     // Fiber unload must cut immediately; rebuilds use the graceful path in
     // teardownServer, leaving this disposer's force-close as the backstop.
     disposeServer = ctx.effect(() => () => teardownServer(false), 'dsh-auth-proxy: server')
+
+    /**
+     * Exchange the upstream launch token shortly after the proxy starts
+     * listening, so the first browser navigation never trips the lazy
+     * 401-swap race (fresh dsh-web restart invalidates the previous cookie;
+     * the exchange is idle until a request hits the 401). dsh web prints its
+     * per-process launch URL to the stdout log shortly after boot, so an
+     * immediate read may find nothing yet — retry briefly, then give up
+     * quietly: the lazy swap on the first real 401 stays as the fallback.
+     */
+    const warmUpstreamExchange = (remaining = 4, delayMs = 2000): void => {
+      if (upstreamAuth.cookie !== undefined) return
+      exchangeUpstreamToken(live.targetHost, live.targetPort, ctx.logger)
+        .then((done) => {
+          if (done) {
+            say('upstream launch-token exchange pre-warmed')
+            return
+          }
+          if (remaining <= 0) {
+            ctx.logger.debug('dsh-auth-proxy: pre-warm gave up; lazy 401 swap will cover the first request')
+            return
+          }
+          warmTimer = setTimeout(() => warmUpstreamExchange(remaining - 1, delayMs), delayMs)
+          warmTimer.unref()
+        })
+        .catch(() => {
+          if (remaining > 0) {
+            warmTimer = setTimeout(() => warmUpstreamExchange(remaining - 1, delayMs), delayMs)
+            warmTimer.unref()
+          }
+        })
+    }
   }
 
   /** Forward a WebSocket upgrade, rewriting host/origin for the trust fence. */
