@@ -1401,7 +1401,7 @@ export function apply(ctx: Context, config?: Config): void {
      * immediate read may find nothing yet — retry briefly, then give up
      * quietly: the lazy swap on the first real 401 stays as the fallback.
      */
-    const warmUpstreamExchange = (remaining = 4, delayMs = 2000): void => {
+    const warmUpstreamExchange = (remaining = 15, delayMs = 2000): void => {
       if (upstreamAuth.cookie !== undefined) return
       exchangeUpstreamToken(live.targetHost, live.targetPort, ctx.logger)
         .then((done) => {
@@ -1410,7 +1410,7 @@ export function apply(ctx: Context, config?: Config): void {
             return
           }
           if (remaining <= 0) {
-            ctx.logger.debug('dsh-auth-proxy: pre-warm gave up; lazy 401 swap will cover the first request')
+            ctx.logger.info('dsh-auth-proxy: pre-warm gave up; lazy 401 swap will cover the first request')
             return
           }
           warmTimer = setTimeout(() => warmUpstreamExchange(remaining - 1, delayMs), delayMs)
