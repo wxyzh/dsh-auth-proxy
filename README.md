@@ -35,6 +35,9 @@ browser ──► auth proxy :8443 (127.0.0.1) ──► dsh webserver 127.0.0.1
   换 favicon（内联 SVG 或本机 SVG 文件）、改写 PWA manifest（name/short_name/icons）、可选注入
   Copilot 侧边栏/英雄区视觉（`brand.logo`，包裹官方 brand 图像 —— 无需新增 client 包）。所有重写都
   发生在代理 forward 路径，**内网直连 127.0.0.1:3080 完全不受影响**；关闭开关则零干预。
+- **web-all remote-web-ui 兼容（`/remote` 前缀还原）**：web-all 0.3.13 起 `dsh-remote-web-ui` 的 client 端嵌在 `web-all/client.js` 聚合包内无法摘除，在非回环来源页面（即经本代理访问）会把 `/api/*`、`/sidebar/*`、`/git/*`、`/pet/*` 改写为 `/remote/api/*`；该插件 host 半通常保持禁用（配对 vs 令牌验证），`/remote` 镜像路由不存在，改写后的请求上游即 405（设置/模型选择/workspace 会话全挂）。代理在转发 HTTP 与 WebSocket upgrade 时剥离 `/remote` 门控前缀、还原原始路径，让 RPC/流式接口可达；非 `/remote` 门控的请求原样透传。
+- **移动端设置面板适配（≤768px 两步式交互）**：web-all 设置对话框在窄屏仍用固定 188px 左导航列，内容区被挤到 ~132px。代理注入纯表现层 CSS+JS：打开设置时先展示完整左侧导航（188px 带文字标签、内容隐藏），点选分区后导航自动收成 44px 图标 rail、内容区展开占满；左下角浮动 `≡` 按钮随时展开/收起导航。选择器按结构匹配（`[role="dialog"][data-dsh-surface] > nav`、`[class*="nav*"]`）而非 css-module hash 类名，web-all 升级 rehash 不破坏。
+- **移动端设置对话框 transform 包含块中和**：web-all 移动端响应式层给侧边栏抽屉设 `transform: translateX(0)`（展开动画用），即便恒等矩阵也创建包含块——嵌套其内的 `position:fixed` 设置对话框退化为抽屉定位（`inset:0` 只盖 320px 而非全视口）。设置对话框打开时经 `:has()` 中和该 transform（`[data-pane="sidebar"]:has([role="dialog"][data-dsh-surface]) { transform: none }`），overlay 恢复全视口、面板达到 `calc(100vw - 48px)`（内容区 276→298px）。该选择器仅在设置对话框存在时命中，会话列表抽屉展开动画不受影响。
 - **无 TLS，禁绑通配/公网**：监听地址仅允许回环与内网（默认 `127.0.0.1`）；`0.0.0.0`、`::` 与公网 IP
   在保存与启动时都会被拒绝。外部访问请在前面挂 TLS 反向代理，回指本监听地址。
 
@@ -126,6 +129,7 @@ settings provider（如 `dsh-settings-file`）持久化，无 settings 服务时
 ## 开发
 
 - 构建：`npm run build`（`tsc` 出宿主侧 `lib/types/` + `tsdown` 出浏览器侧 `lib/client.js`）。
+- **本机坑（junction 开发副本）**：`npm run build` / `pnpm run build` 会触发 `prepare` 里的 pnpm install，reify 跟随 `node_modules/@deepseek-ai` junction 可能破坏全局 dsh 内核。只改宿主侧（`src/index.ts`）时用 `tsc -p <临时 host-only tsconfig>`（include 仅 `src/index.ts`、exclude `src/client`）输出到 `lib/types/`，**不要跑** `npm run build`；详见 `AGENTS.md`。
 - 类型检查：`npm run typecheck`。
 - 冒烟测试：`npm run smoke`（驱动构建产物，覆盖空/占位令牌不监听、登录流程、XFF 伪造不绕过白名单、
   热更新不重建、改端口重建、占位令牌禁用、拒绝公网监听地址、HTML 双脚本注入、无状态会话重启存活与换令牌全体下线）。
@@ -134,4 +138,6 @@ settings provider（如 `dsh-settings-file`）持久化，无 settings 服务时
 ## 已知限制
 
 - 会话永久有效且无状态（签名 cookie，重启不失效）；**无单点剔除**，改令牌即全体下线、登出仅清 cookie，属预期；失败计数表由定时清理兜底。
+- **移动端适配耦合 web-all 结构**：设置面板折叠/宽度优化依赖 web-all 当前的 DOM/CSS 结构（已尽量用结构选择器抗 css-module rehash，但 web-all 语义级重构仍可能失效）；注入的选择器未来若不再匹配，需按新版结构复查。
+- **`/remote` 前缀剥离是通用的前缀还原**：转发层对所有以 `/remote` 开头的路径做剥离（当前仅 web-all remote-web-ui client 会生成此类路径）；若未来有其他插件主动使用 `/remote/*` 路径，会被一并还原，需要留意。
 - 当前目录已是 git 仓库（初始提交已建）。
