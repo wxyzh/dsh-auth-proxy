@@ -465,33 +465,49 @@ export const LOOPBACK_COMPAT_SCRIPT = loopbackCompatScript()
  */
 const MOBILE_SETTINGS_NAV_FIX = `<style>
 @media (max-width: 768px) {
+  /* web-all 移动端响应式层给侧边栏抽屉设了 transform: translateX(0)（为展开动画），
+     它创建包含块 → 设置对话框（嵌套在抽屉 footArea 内，position:fixed）退化为相对抽屉
+     定位，inset:0 只盖 320px 而非全视口。对话框打开时中和 transform：fixed 恢复视口
+     定位，面板 max-width: calc(100vw-48px) 生效（内容区 276px → ~342px）。
+     :has() 精确限定仅设置对话框存在时生效，不影响会话列表展开/侧边栏动画。 */
+  [data-dsh-frame] [data-pane="sidebar"]:has([role="dialog"][data-dsh-surface]) {
+    transform: none !important;
+  }
+  /* 默认 = 导航展开（188px 带标签）+ 内容隐藏：纯选择器视图 */
   [role="dialog"][data-dsh-surface] > nav {
-    width: 44px !important;
-    min-width: 44px !important;
-    flex: 0 0 44px !important;
-    padding: 22px 4px 0 !important;
-  }
-  [role="dialog"][data-dsh-surface] > nav [class*="navLabel"],
-  [role="dialog"][data-dsh-surface] > nav [class*="navTitle"] {
-    display: none !important;
-  }
-  [role="dialog"][data-dsh-surface] > nav [class*="navCell"] {
-    justify-content: center !important;
-    padding: 9px 0 !important;
-  }
-  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="expanded"] > nav {
     width: 188px !important;
     min-width: 188px !important;
     flex: 0 0 188px !important;
     padding: 22px 12px 0 !important;
   }
-  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="expanded"] > nav [class*="navLabel"],
-  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="expanded"] > nav [class*="navTitle"] {
+  [role="dialog"][data-dsh-surface] > nav [class*="navLabel"],
+  [role="dialog"][data-dsh-surface] > nav [class*="navTitle"] {
     display: block !important;
   }
-  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="expanded"] > nav [class*="navCell"] {
+  [role="dialog"][data-dsh-surface] > nav [class*="navCell"] {
     justify-content: flex-start !important;
     padding: 9px 16px 9px 12px !important;
+  }
+  [role="dialog"][data-dsh-surface] > div[class*="_content"] {
+    display: none !important;
+  }
+  /* 折叠态 = 导航收成 44px 图标 rail + 内容展开占满 */
+  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="collapsed"] > nav {
+    width: 44px !important;
+    min-width: 44px !important;
+    flex: 0 0 44px !important;
+    padding: 22px 4px 0 !important;
+  }
+  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="collapsed"] > nav [class*="navLabel"],
+  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="collapsed"] > nav [class*="navTitle"] {
+    display: none !important;
+  }
+  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="collapsed"] > nav [class*="navCell"] {
+    justify-content: center !important;
+    padding: 9px 0 !important;
+  }
+  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="collapsed"] > div[class*="_content"] {
+    display: flex !important;
   }
 }
 </style>
@@ -501,6 +517,7 @@ const MOBILE_SETTINGS_NAV_FIX = `<style>
   function isNarrow() { return window.matchMedia('(max-width: 768px)').matches; }
   function findPanel() { return document.querySelector('[role="dialog"][data-dsh-surface]'); }
   var btn = null;
+  function setState(panel, state) { panel.setAttribute('data-dsh-settings-nav', state); }
   function ensureButton() {
     if (btn && btn.isConnected) return btn;
     btn = document.createElement('button');
@@ -510,23 +527,40 @@ const MOBILE_SETTINGS_NAV_FIX = `<style>
     btn.textContent = '\u2261';
     btn.style.cssText = 'position:fixed;left:8px;bottom:16px;z-index:2147483647;width:40px;height:40px;border-radius:50%;border:none;background:var(--dsw-alias-bg-layer-2, #2a2a33);color:var(--dsw-alias-label-primary, #eee);font-size:20px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3);display:none;align-items:center;justify-content:center;';
     document.body.appendChild(btn);
-    btn.addEventListener('click', function () {
+    btn.addEventListener('click', function (ev) {
+      ev.stopPropagation();
       var panel = findPanel();
       if (!panel) return;
       var expanded = panel.getAttribute('data-dsh-settings-nav') === 'expanded';
-      panel.setAttribute('data-dsh-settings-nav', expanded ? 'collapsed' : 'expanded');
+      setState(panel, expanded ? 'collapsed' : 'expanded');
     });
     return btn;
+  }
+  /* 点选导航项 → 自动收成 rail 并展开内容（两步式交互的核心） */
+  function installNavAutoCollapse() {
+    document.addEventListener('click', function (ev) {
+      if (!isNarrow()) return;
+      var panel = findPanel();
+      if (!panel) return;
+      var t = ev.target;
+      if (!(t instanceof Element)) return;
+      var cell = t.closest('[role="dialog"][data-dsh-surface] > nav [class*="_navCell"]');
+      if (cell && panel.getAttribute('data-dsh-settings-nav') !== 'collapsed') {
+        setState(panel, 'collapsed');
+      }
+    }, true);
   }
   function sync() {
     var panel = findPanel();
     var toggle = ensureButton();
     if (!panel || !isNarrow()) { toggle.style.display = 'none'; return; }
     toggle.style.display = 'flex';
-    if (!panel.hasAttribute('data-dsh-settings-nav')) panel.setAttribute('data-dsh-settings-nav', 'collapsed');
+    /* 初始 = 导航展开 + 内容隐藏（纯选择器） */
+    if (!panel.hasAttribute('data-dsh-settings-nav')) setState(panel, 'expanded');
   }
   function boot() {
     sync();
+    installNavAutoCollapse();
     var mo = new MutationObserver(function () { sync(); });
     mo.observe(document.body, { childList: true, subtree: true });
     window.addEventListener('resize', sync);
