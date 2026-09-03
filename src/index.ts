@@ -454,6 +454,92 @@ export function loopbackCompatScript(trustedOrigins: string[] = []): string {
 export const LOOPBACK_COMPAT_SCRIPT = loopbackCompatScript()
 
 /**
+ * Mobile settings-dialog nav collapse (2026-09-03, web-all 0.3.13 responsive
+ * layer): the settings dialog renders a fixed 188px left nav column even on
+ * narrow viewports, squeezing the content pane to ~130px. This injects a
+ * bottom-left floating toggle that collapses the nav to a 44px icon rail on
+ * screens ≤768px (labels/title hidden, cells centered); tapping toggles back
+ * to the full nav. Pure presentation, no web-all source change; class names
+ * are matched by structure (`> nav` / `[class*="nav*"]`) so web-all upgrades
+ * that rehash CSS modules do not break it. Desktop viewports are untouched.
+ */
+const MOBILE_SETTINGS_NAV_FIX = `<style>
+@media (max-width: 768px) {
+  [role="dialog"][data-dsh-surface] > nav {
+    width: 44px !important;
+    min-width: 44px !important;
+    flex: 0 0 44px !important;
+    padding: 22px 4px 0 !important;
+  }
+  [role="dialog"][data-dsh-surface] > nav [class*="navLabel"],
+  [role="dialog"][data-dsh-surface] > nav [class*="navTitle"] {
+    display: none !important;
+  }
+  [role="dialog"][data-dsh-surface] > nav [class*="navCell"] {
+    justify-content: center !important;
+    padding: 9px 0 !important;
+  }
+  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="expanded"] > nav {
+    width: 188px !important;
+    min-width: 188px !important;
+    flex: 0 0 188px !important;
+    padding: 22px 12px 0 !important;
+  }
+  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="expanded"] > nav [class*="navLabel"],
+  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="expanded"] > nav [class*="navTitle"] {
+    display: block !important;
+  }
+  [role="dialog"][data-dsh-surface][data-dsh-settings-nav="expanded"] > nav [class*="navCell"] {
+    justify-content: flex-start !important;
+    padding: 9px 16px 9px 12px !important;
+  }
+}
+</style>
+<script>
+(function () {
+  var TOGGLE_ID = 'dsh-settings-nav-toggle';
+  function isNarrow() { return window.matchMedia('(max-width: 768px)').matches; }
+  function findPanel() { return document.querySelector('[role="dialog"][data-dsh-surface]'); }
+  var btn = null;
+  function ensureButton() {
+    if (btn && btn.isConnected) return btn;
+    btn = document.createElement('button');
+    btn.id = TOGGLE_ID;
+    btn.setAttribute('aria-label', '\u5c55\u5f00/\u6536\u8d77\u8bbe\u7f6e\u5bfc\u822a');
+    btn.setAttribute('title', '\u5c55\u5f00/\u6536\u8d77\u8bbe\u7f6e\u5bfc\u822a');
+    btn.textContent = '\u2261';
+    btn.style.cssText = 'position:fixed;left:8px;bottom:16px;z-index:2147483647;width:40px;height:40px;border-radius:50%;border:none;background:var(--dsw-alias-bg-layer-2, #2a2a33);color:var(--dsw-alias-label-primary, #eee);font-size:20px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3);display:none;align-items:center;justify-content:center;';
+    document.body.appendChild(btn);
+    btn.addEventListener('click', function () {
+      var panel = findPanel();
+      if (!panel) return;
+      var expanded = panel.getAttribute('data-dsh-settings-nav') === 'expanded';
+      panel.setAttribute('data-dsh-settings-nav', expanded ? 'collapsed' : 'expanded');
+    });
+    return btn;
+  }
+  function sync() {
+    var panel = findPanel();
+    var toggle = ensureButton();
+    if (!panel || !isNarrow()) { toggle.style.display = 'none'; return; }
+    toggle.style.display = 'flex';
+    if (!panel.hasAttribute('data-dsh-settings-nav')) panel.setAttribute('data-dsh-settings-nav', 'collapsed');
+  }
+  function boot() {
+    sync();
+    var mo = new MutationObserver(function () { sync(); });
+    mo.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('resize', sync);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();
+</script>`
+
+/**
  * Client script that renames the browser tab to a custom brand. dsh's own
  * DocumentTitle projection (dsh-client-ui-renderer) writes the product title
  * ("DeepSeek Harness") into document.title — bare, and as the
@@ -666,7 +752,7 @@ function decorateHtml(body: string, brand: BrandResolved, logger: DebugLogger, t
     body = body.replace(/<title>([^<]*)<\/title>/i, () => `<title>${htmlEscape(brand.title)}</title>`)
   }
   if (body.includes('</head>')) {
-    const injections = [`${UUID_POLYFILL}\n${loopbackCompatScript(trustedOrigins)}`]
+    const injections = [`${UUID_POLYFILL}\n${loopbackCompatScript(trustedOrigins)}\n${MOBILE_SETTINGS_NAV_FIX}`]
     if (brand.enabled && brand.title) injections.push(titleBrandScript(brand.title))
     // Copilot sidebar/hero visual occupants (wraps the official brand graph entry).
     if (brand.enabled && brand.logo) injections.push(brandVisualScript(brand.wordmark || 'Copilot'))
