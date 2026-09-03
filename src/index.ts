@@ -740,6 +740,24 @@ const LOGIN_PAGE = (banner: string, locked = false, accessUrls: string[] = []): 
 </html>`
 
 /** Read the request body as text (capped). */
+/**
+ * Strip the web-all remote-web-ui client's `/remote` gate prefix from a
+ * request URL. The client (bundled inside web-all/client.js, inseparable)
+ * rewrites `/api/*`, `/sidebar/*`, `/git/*`, `/pet/*` onto a `/remote`
+ * mirror whenever the page origin is non-loopback — which is always true
+ * behind this proxy. The plugin's host half stays disabled here (pairing
+ * is not used, token auth only), so no `/remote` mirror route exists
+ * upstream; rewriting back to the original path keeps RPC/stream endpoints
+ * reachable. A request that is not on the `/remote` gate is untouched.
+ */
+function stripRemoteGatePrefix(raw: string): string {
+  if (!raw.startsWith('/remote')) return raw
+  const rest = raw.slice('/remote'.length)
+  if (rest === '' || rest.startsWith('/')) return rest === '' ? '/' : rest
+  // `/remotefoo/...` is not the gate; leave untouched.
+  return raw
+}
+
 function readBody(req: IncomingMessage, cap = 64 * 1024): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
@@ -1107,7 +1125,13 @@ export function apply(ctx: Context, config?: Config): void {
       res.on('error', (err) => {
         ctx.logger.debug(`dsh-auth-proxy: client response error ${String(err)}`)
       })
-      const targetUrl = `http://${live.targetHost}:${live.targetPort}${req.url ?? '/'}`
+      // Strip the web-all remote-web-ui client's `/remote` gate prefix (the
+      // client rewrites `/api/*` → `/remote/api/*` whenever the page origin is
+      // non-loopback, which is always true behind this proxy). The plugin's
+      // host half stays disabled (pairing is not used), so no `/remote` mirror
+      // route exists upstream — rewriting back to the original path keeps the
+      // RPC/stream endpoints reachable.
+      const targetUrl = `http://${live.targetHost}:${live.targetPort}${stripRemoteGatePrefix(req.url ?? '/')}`
       const headers = { ...req.headers }
       headers.host = `${live.targetHost}:${live.targetPort}`
       if (headers.origin) headers.origin = `http://${live.targetHost}:${live.targetPort}`
@@ -1442,7 +1466,7 @@ export function apply(ctx: Context, config?: Config): void {
         req.headers.cookie = existing ? `${existing}; ${upstreamAuth.cookie}` : upstreamAuth.cookie
       }
     }
-    const targetUrl = `http://${live.targetHost}:${live.targetPort}${req.url ?? '/'}`
+    const targetUrl = `http://${live.targetHost}:${live.targetPort}${stripRemoteGatePrefix(req.url ?? '/')}`
     const proxy = httpRequest(targetUrl, { method: req.method, headers: req.headers })
     const onSocketError = (err: Error): void => {
       ctx.logger.debug(`dsh-auth-proxy: tunnel socket error ${String(err)}`)
