@@ -31,11 +31,11 @@ auth-proxy 配置分区（`settings.section`，与 Models/General 同级，非�
   值为 `payload.signature`（HMAC-SHA256，密钥由令牌 `hash(token)` 派生，见 `src/index.ts` 的 `issueSession`/`isValidSession`），
   服务端不存会话表，**重启后 cookie 仍有效**；**更换令牌 = 全体下线**（密钥变化令全部旧签名失效），登出仅清客户端 cookie；
   失败计数由定时清理兜底（30 分钟扫描，闲置超 1 小时清除）。
-- **配置写入（与官方一致）**：dsh-settings scope 是**唯一写入路径**——Host 用 `installSettingsSection` 注册
+- **配置写入（与官方一致）**：dsh-settings scope 是**唯一写入路径**——Host 用 `installSection` 注册
   `dsh-auth-proxy` 命名空间（`base` = 组合入口，用户文档层由部署的 settings provider（如 `dsh-settings-file`）持久化，
   无 settings 服务时退化为组合入口）；浏览器配置分区经 `ctx.settingsScope` 读写（revision 栅栏，Host `validate` 把关）。
   **不存在自建的卡片配置文件**（旧的 `~/.dsh/dsh-auth-proxy.json` 权威已废弃）。监听 host 策略在
-  `installSettingsSection` 的 `validate` 钩子拒绝；令牌占位符是合法存储值，代理保持禁用。
+  `installSection` 的 `validate` 钩子拒绝；令牌占位符是合法存储值，代理保持禁用。
 - **监听地址（勿放开）**：无 TLS，`listenHostIssue()`（`src/index.ts`）只允许回环与内网地址
   （`127/8`、`10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`::1`，`localhost`），
   **拒绝 `0.0.0.0`、`::` 与公网 IP**——默认 `127.0.0.1`，外部访问须用 TLS 反向代理回指监听地址。
